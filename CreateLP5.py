@@ -4,7 +4,6 @@ from io import BytesIO
 import pandas as pd
 import zipfile
 import locale
-import os
 
 def format_number_indonesia(value):
     """Format number to Indonesian format (e.g., 12.000,00)."""
@@ -16,22 +15,21 @@ def format_number_indonesia(value):
 
 def replace_placeholders(document, replacements):
     """
-    Replace placeholders in a DOCX document tanpa merusak format run.
-    Placeholder harus berada dalam satu run utuh, misalnya '{placeholder}'.
+    Replace placeholders di DOCX tanpa mengubah format run.
+    Syarat: Placeholder harus utuh dalam satu run, misalnya '{nama}'.
     """
-    # Ganti placeholder di semua paragraf (di luar tabel)
+    # Ganti placeholder di paragraf di luar tabel
     for paragraph in document.paragraphs:
         for run in paragraph.runs:
             text = run.text
             for key, val in replacements.items():
-                # Jika angka, gunakan format Indonesia
                 formatted_value = format_number_indonesia(val) if isinstance(val, (int, float)) else str(val)
                 placeholder = f"{{{key}}}"
                 if placeholder in text:
                     text = text.replace(placeholder, formatted_value)
             run.text = text
 
-    # Ganti placeholder di semua paragraf dalam tabel
+    # Ganti placeholder di paragraf dalam tabel
     for table in document.tables:
         for row in table.rows:
             for cell in row.cells:
@@ -44,26 +42,21 @@ def replace_placeholders(document, replacements):
                             if placeholder in text:
                                 text = text.replace(placeholder, formatted_value)
                         run.text = text
-
     return document
 
 def extract_placeholders(document):
     """
-    Ekstrak placeholder dari dokumen. 
-    CATATAN: Fungsi ini hanya mencari '{' dan '}' pada level paragraph.text,
-    sehingga placeholder yang terpecah di beberapa run mungkin tidak terdeteksi.
-    Pastikan placeholder utuh dalam satu run!
+    Ekstrak placeholder dari dokumen.
+    Hanya mendeteksi placeholder utuh dalam satu run (misalnya '{nama}').
     """
     placeholders = set()
-    
-    # Cek placeholder di paragraf (di luar tabel)
+    # Cek placeholder di paragraf di luar tabel
     for paragraph in document.paragraphs:
         if "{" in paragraph.text and "}" in paragraph.text:
             for part in paragraph.text.split():
                 if part.startswith("{") and part.endswith("}"):
                     placeholders.add(part.strip("{}"))
-
-    # Cek placeholder di dalam tabel
+    # Cek placeholder di paragraf dalam tabel
     for table in document.tables:
         for row in table.rows:
             for cell in row.cells:
@@ -72,18 +65,17 @@ def extract_placeholders(document):
                         for part in paragraph.text.split():
                             if part.startswith("{") and part.endswith("}"):
                                 placeholders.add(part.strip("{}"))
-
     return sorted(placeholders)
 
 def save_docx(document):
-    """Save changes to a new DOCX file."""
+    """Simpan dokumen ke dalam BytesIO."""
     buffer = BytesIO()
     document.save(buffer)
     buffer.seek(0)
     return buffer
 
 def generate_zip(files):
-    """Generate a ZIP file from a list of files."""
+    """Generate file ZIP dari daftar file (nama file, buffer)."""
     zip_buffer = BytesIO()
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         for file_name, file_buffer in files:
@@ -95,7 +87,9 @@ def main():
     st.title("SRR KALIBATA REPORT MAKER")
     st.write("Upload DOCX templates and an Excel file to generate reports automatically.")
 
+    # Upload template DOCX (bisa lebih dari satu)
     uploaded_templates = st.file_uploader("Upload DOCX Templates", type="docx", accept_multiple_files=True)
+    # Upload file Excel
     uploaded_excel = st.file_uploader("Upload Excel File", type="xlsx")
     
     if uploaded_templates and uploaded_excel:
@@ -104,12 +98,18 @@ def main():
         st.write("Data Preview:")
         st.dataframe(data)
 
+        # Simpan setiap template sebagai bytes agar bisa dibuka ulang per laporan
         templates = {}
         all_placeholders = set()
         for file in uploaded_templates:
-            document = Document(file)
-            placeholders = extract_placeholders(document)
-            templates[file.name] = {"document": document, "placeholders": placeholders}
+            doc_bytes = file.read()
+            # Buka dokumen untuk ekstrak placeholder
+            doc_temp = Document(BytesIO(doc_bytes))
+            placeholders = extract_placeholders(doc_temp)
+            templates[file.name] = {
+                "doc_bytes": doc_bytes,
+                "placeholders": placeholders
+            }
             all_placeholders.update(placeholders)
 
         unmatched_placeholders = [ph for ph in all_placeholders if ph not in data.columns]
@@ -119,24 +119,27 @@ def main():
         if st.button("Generate Reports"):
             st.success("Generating reports...")
             generated_files = []
+            # Untuk setiap baris di Excel
             for index, row in data.iterrows():
+                row_dict = row.to_dict()
+                # Untuk setiap template
                 for template_name, template_data in templates.items():
-                    # Buat salinan Document agar template asli tidak terubah
-                    doc_copy = Document()
-                    doc_copy.element.body.clear()
-                    for element in template_data["document"].element.body:
-                        doc_copy.element.body.append(element.clone())
-
-                    # Replace placeholders di salinan
-                    replace_placeholders(doc_copy, row.to_dict())
-
-                    # Simpan salinan yang sudah diganti
+                    # Buka ulang dokumen template dari bytes (ini menghindari penggunaan clone)
+                    doc_copy = Document(BytesIO(template_data["doc_bytes"]))
+                    # Replace placeholder di dokumen
+                    replace_placeholders(doc_copy, row_dict)
+                    # Simpan dokumen yang sudah diganti
                     file_name = f"{index+1}_{template_name}"
                     buffer = save_docx(doc_copy)
                     generated_files.append((file_name, buffer))
-
+            # Buat file ZIP berisi semua laporan
             zip_buffer = generate_zip(generated_files)
-            st.download_button("Download All Reports as ZIP", data=zip_buffer, file_name="generated_reports.zip", mime="application/zip")
+            st.download_button(
+                "Download All Reports as ZIP",
+                data=zip_buffer,
+                file_name="generated_reports.zip",
+                mime="application/zip"
+            )
 
 if __name__ == "__main__":
     main()
