@@ -1,145 +1,162 @@
 import streamlit as st
+import pandas as pd
 from docx import Document
 from io import BytesIO
-import pandas as pd
 import zipfile
-import locale
+import re
+from itertools import zip_longest
 
-def format_number_indonesia(value):
-    """Format number to Indonesian format (e.g., 12.000,00)."""
-    try:
-        locale.setlocale(locale.LC_NUMERIC, "id_ID.UTF-8")
-        return locale.format_string("%.2f", value, grouping=True)
-    except:
-        return value
+st.set_page_config(page_title="Template Word Otomatis", layout="wide")
+st.markdown("# SRR Kalibata Report Maker")
 
-def replace_placeholders(document, replacements):
-    """
-    Replace placeholders di DOCX tanpa mengubah format run.
-    Syarat: Placeholder harus utuh dalam satu run, misalnya '{nama}'.
-    """
-    # Ganti placeholder di paragraf di luar tabel
-    for paragraph in document.paragraphs:
-        for run in paragraph.runs:
-            text = run.text
-            for key, val in replacements.items():
-                formatted_value = format_number_indonesia(val) if isinstance(val, (int, float)) else str(val)
-                placeholder = f"{{{key}}}"
-                if placeholder in text:
-                    text = text.replace(placeholder, formatted_value)
-            run.text = text
+def replace_placeholders_in_paragraph(para, data):
+    for key, value in data.items():
+        placeholder = f'{{{{{key}}}}}'
+        replaced_in_run = False
+        for run in para.runs:
+            if placeholder in run.text:
+                is_bold = run.bold
+                is_italic = run.italic
+                is_underline = run.underline
+                font_name = run.font.name
+                font_size = run.font.size
+                font_color = run.font.color.rgb
+                run.text = run.text.replace(placeholder, str(value))
+                run.bold = is_bold
+                run.italic = is_italic
+                run.underline = is_underline
+                run.font.name = font_name
+                run.font.size = font_size
+                run.font.color.rgb = font_color
+                replaced_in_run = True
+        if not replaced_in_run and placeholder in para.text:
+            new_text = para.text.replace(placeholder, str(value))
+            for run in para.runs:
+                run.text = ""
+            if para.runs:
+                para.runs[0].text = new_text
+            else:
+                para.add_run(new_text)
+    return para
 
-    # Ganti placeholder di paragraf dalam tabel
-    for table in document.tables:
+def replace_placeholders(doc, data):
+    for para in doc.paragraphs:
+        replace_placeholders_in_paragraph(para, data)
+    for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
-                for paragraph in cell.paragraphs:
-                    for run in paragraph.runs:
-                        text = run.text
-                        for key, val in replacements.items():
-                            formatted_value = format_number_indonesia(val) if isinstance(val, (int, float)) else str(val)
-                            placeholder = f"{{{key}}}"
-                            if placeholder in text:
-                                text = text.replace(placeholder, formatted_value)
-                        run.text = text
-    return document
+                for para in cell.paragraphs:
+                    replace_placeholders_in_paragraph(para, data)
+    return doc
 
-def extract_placeholders(document):
-    """
-    Ekstrak placeholder dari dokumen.
-    Hanya mendeteksi placeholder utuh dalam satu run (misalnya '{nama}').
-    """
-    placeholders = set()
-    # Cek placeholder di paragraf di luar tabel
-    for paragraph in document.paragraphs:
-        if "{" in paragraph.text and "}" in paragraph.text:
-            for part in paragraph.text.split():
-                if part.startswith("{") and part.endswith("}"):
-                    placeholders.add(part.strip("{}"))
-    # Cek placeholder di paragraf dalam tabel
-    for table in document.tables:
-        for row in table.rows:
-            for cell in row.cells:
-                for paragraph in cell.paragraphs:
-                    if "{" in paragraph.text and "}" in paragraph.text:
-                        for part in paragraph.text.split():
-                            if part.startswith("{") and part.endswith("}"):
-                                placeholders.add(part.strip("{}"))
-    return sorted(placeholders)
+def process_files(word_file, data_dict):
+    doc = Document(word_file)
+    updated_doc = replace_placeholders(doc, data_dict)
+    output = BytesIO()
+    updated_doc.save(output)
+    output.seek(0)
+    return output, updated_doc
 
-def save_docx(document):
-    """Simpan dokumen ke dalam BytesIO."""
-    buffer = BytesIO()
-    document.save(buffer)
-    buffer.seek(0)
-    return buffer
+def extract_text_from_docx(docx_obj):
+    return "\n".join([para.text for para in docx_obj.paragraphs])
 
-def generate_zip(files):
-    """Generate file ZIP dari daftar file (nama file, buffer)."""
-    zip_buffer = BytesIO()
-    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-        for file_name, file_buffer in files:
-            zf.writestr(file_name, file_buffer.getvalue())
-    zip_buffer.seek(0)
-    return zip_buffer
-
-def main():
-    st.title("SRR KALIBATA REPORT MAKER")
-    st.write("Upload DOCX templates and an Excel file to generate reports automatically.")
-
-    # Upload template DOCX (bisa lebih dari satu)
-    uploaded_templates = st.file_uploader("Upload DOCX Templates", type="docx", accept_multiple_files=True)
-    # Upload file Excel
-    uploaded_excel = st.file_uploader("Upload Excel File", type="xlsx")
+# ✅ Fungsi terbaru dengan regex fleksibel
+def check_value_consistency_table(text):
+    # Regex untuk angka nominal yang diikuti tanda kurung buka
+    number_pattern = r'Rp\s*([\d\.]+,\d{2})\s*\('
     
-    if uploaded_templates and uploaded_excel:
-        st.success(f"{len(uploaded_templates)} templates uploaded successfully!")
-        data = pd.read_excel(uploaded_excel)
-        st.write("Data Preview:")
-        st.dataframe(data)
+    # Regex untuk penyebutan nominal dalam huruf kapital, berakhiran "RUPIAH"
+    verbal_block_pattern = r'\(\s*([A-Z\s]+RUPIAH)\s*\)'
 
-        # Simpan setiap template sebagai bytes agar bisa dibuka ulang per laporan
-        templates = {}
-        all_placeholders = set()
-        for file in uploaded_templates:
-            doc_bytes = file.read()
-            # Buka dokumen untuk ekstrak placeholder
-            doc_temp = Document(BytesIO(doc_bytes))
-            placeholders = extract_placeholders(doc_temp)
-            templates[file.name] = {
-                "doc_bytes": doc_bytes,
-                "placeholders": placeholders
-            }
-            all_placeholders.update(placeholders)
+    # Ambil daftar angka dan konversi menjadi integer
+    numbers = re.findall(number_pattern, text.replace(".", "").replace("Rp", "Rp"))
+    number_ints = [int(float(n.replace(",", "."))) for n in numbers]
 
-        unmatched_placeholders = [ph for ph in all_placeholders if ph not in data.columns]
-        if unmatched_placeholders:
-            st.warning(f"Unmatched placeholders: {', '.join(unmatched_placeholders)}")
+    # Ambil daftar penyebutan verbal (huruf kapital)
+    verbal_blocks = re.findall(verbal_block_pattern, text.upper())
+    normalized_verbal = [vb.strip() for vb in verbal_blocks]
 
-        if st.button("Generate Reports"):
-            st.success("Generating reports...")
-            generated_files = []
-            # Untuk setiap baris di Excel
-            for index, row in data.iterrows():
-                row_dict = row.to_dict()
-                # Untuk setiap template
-                for template_name, template_data in templates.items():
-                    # Buka ulang dokumen template dari bytes (ini menghindari penggunaan clone)
-                    doc_copy = Document(BytesIO(template_data["doc_bytes"]))
-                    # Replace placeholder di dokumen
-                    replace_placeholders(doc_copy, row_dict)
-                    # Simpan dokumen yang sudah diganti
-                    file_name = f"{index+1}_{template_name}"
-                    buffer = save_docx(doc_copy)
-                    generated_files.append((file_name, buffer))
-            # Buat file ZIP berisi semua laporan
-            zip_buffer = generate_zip(generated_files)
+    # Gabungkan angka dan kata untuk ditampilkan di tabel
+    rows = []
+    for angka, kata in zip_longest(number_ints, normalized_verbal, fillvalue="(tidak ditemukan)"):
+        rows.append({
+            "Angka (Rp)": f"Rp {angka:,}".replace(",", ".") if isinstance(angka, int) else angka,
+            "Penyebutan dalam Kata": kata,
+            "Keterangan": "✅ Sesuai" if isinstance(angka, int) and kata != "(tidak ditemukan)" else "⚠️ Tidak cocok"
+        })
+
+    return pd.DataFrame(rows)
+
+def highlight_placeholders(text):
+    return re.sub(r"(\{\{.*?\}\})", r"[PLACEHOLDER:\1]", text)
+
+# ========== STREAMLIT UI ==========
+with st.sidebar:
+    st.header("📂 Upload Dokumen")
+    word_files = st.file_uploader("Template Laporan (.docx)", type=["docx"], accept_multiple_files=True)
+    excel_file = st.file_uploader("Data Lembar Kerja (.xlsx)", type=["xlsx"])
+
+if excel_file:
+    df_excel = pd.read_excel(excel_file, header=None, skiprows=6, sheet_name="Laporan", engine='openpyxl')
+    st.subheader("📊 Tabel Data pada Lembar Kerja (edit jika perlu)")
+    df_editable = st.data_editor(df_excel, num_rows="dynamic", use_container_width=True)
+
+    data_dict = {}
+    for _, row in df_editable.iterrows():
+        key = row[0]
+        value = row[1]
+        if pd.notnull(key):
+            data_dict[str(key)] = str(value) if pd.notnull(value) else ""
+
+    if word_files:
+        st.subheader("📄 Preview Laporan, cek sebelum dibuat filenya")
+        processed_files = []
+
+        for word_file in word_files:
+            output_file, updated_doc = process_files(word_file, data_dict)
+            raw_text = extract_text_from_docx(updated_doc)
+            preview_text = highlight_placeholders(raw_text)
+            consistency_df = check_value_consistency_table(preview_text)
+
+            with st.expander(f"📁 {word_file.name}", expanded=True):
+                st.text_area(
+                    "Isi Dokumen Terisi (Placeholder ditandai):",
+                    value=preview_text,
+                    height=400,
+                    key=word_file.name + "_preview",
+                    disabled=True,
+                    label_visibility="collapsed"
+                )
+
+                if not consistency_df.empty:
+                    st.markdown("🔍 **Cek Konsistensi Nominal Angka vs Kata**")
+                    st.dataframe(consistency_df, use_container_width=True)
+                    if "⚠️ Tidak cocok" in consistency_df["Keterangan"].values:
+                        st.warning("Terdapat ketidaksesuaian antara angka dan penyebutannya.")
+                    else:
+                        st.success("Semua penyebutan nominal sesuai dengan angkanya.")
+
+            processed_files.append((word_file.name, output_file))
+
+        st.subheader("⬇️ Unduh Hasil")
+        if len(processed_files) == 1:
+            file_name, file_obj = processed_files[0]
             st.download_button(
-                "Download All Reports as ZIP",
+                label="Unduh Dokumen",
+                data=file_obj,
+                file_name=file_name.replace(".docx", "_terisi.docx"),
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            )
+        else:
+            zip_buffer = BytesIO()
+            with zipfile.ZipFile(zip_buffer, "w") as zipf:
+                for name, file_obj in processed_files:
+                    filename = name.replace(".docx", "_terisi.docx")
+                    zipf.writestr(filename, file_obj.getvalue())
+            zip_buffer.seek(0)
+            st.download_button(
+                label="Unduh Semua Dokumen (.zip)",
                 data=zip_buffer,
-                file_name="generated_reports.zip",
+                file_name="Semua_Dokumen_Terisi.zip",
                 mime="application/zip"
             )
-
-if __name__ == "__main__":
-    main()
