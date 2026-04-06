@@ -103,8 +103,10 @@ if excel_file:
 
     data_dict = {}
     for _, row in df_editable.iterrows():
-        key = row[0]
-        value = row[1]
+        # PERBAIKAN DI SINI: Gunakan .iloc untuk mengambil urutan kolom dengan aman
+        key = row.iloc[0]
+        value = row.iloc[1]
+        
         if pd.notnull(key):
             data_dict[str(key)] = str(value) if pd.notnull(value) else ""
 
