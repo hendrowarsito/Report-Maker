@@ -1,55 +1,45 @@
-import streamlit as st
-import pandas as pd
-from docx import Document
-from io import BytesIO
-import zipfile
-import re
-from itertools import zip_longest
-
-st.set_page_config(page_title="Template Word Otomatis", layout="wide")
-st.markdown("# SRR Kalibata Report Maker")
-
-def replace_placeholders_in_paragraph(para, data):
-    for key, value in data.items():
-        placeholder = f'{{{{{key}}}}}'
-        replaced_in_run = False
-        for run in para.runs:
-            if placeholder in run.text:
-                is_bold = run.bold
-                is_italic = run.italic
-                is_underline = run.underline
-                font_name = run.font.name
-                font_size = run.font.size
-                font_color = run.font.color.rgb
-                run.text = run.text.replace(placeholder, str(value))
-                run.bold = is_bold
-                run.italic = is_italic
-                run.underline = is_underline
-                run.font.name = font_name
-                run.font.size = font_size
-                run.font.color.rgb = font_color
-                replaced_in_run = True
-        if not replaced_in_run and placeholder in para.text:
-            new_text = para.text.replace(placeholder, str(value))
-            for run in para.runs:
-                run.text = ""
-            if para.runs:
-                para.runs[0].text = new_text
-            else:
-                para.add_run(new_text)
     return para
 
-def replace_placeholders(doc, data):
-    for para in doc.paragraphs:
+
+# ---------------------------------------------------------------------------
+# Document-level replacement (body + tabel + header + footer)
+# ---------------------------------------------------------------------------
+
+def _process_paragraph_collection(paragraphs, data: dict):
+    for para in paragraphs:
         replace_placeholders_in_paragraph(para, data)
-    for table in doc.tables:
+
+
+def _process_table_collection(tables, data: dict):
+    for table in tables:
         for row in table.rows:
             for cell in row.cells:
-                for para in cell.paragraphs:
-                    replace_placeholders_in_paragraph(para, data)
+                _process_paragraph_collection(cell.paragraphs, data)
+                _process_table_collection(cell.tables, data)  # tabel tersarang
+
+
+def replace_placeholders(doc: Document, data: dict) -> Document:
+    # Body
+    _process_paragraph_collection(doc.paragraphs, data)
+    _process_table_collection(doc.tables, data)
+
+    # Header dan footer setiap section
+    for section in doc.sections:
+        for hf in (section.header, section.footer,
+                   section.even_page_header, section.even_page_footer,
+                   section.first_page_header, section.first_page_footer):
+            if hf is not None:
+                _process_paragraph_collection(hf.paragraphs, data)
+                _process_table_collection(hf.tables, data)
+
     return doc
 
-def process_files(word_file, data_dict):
+
+# ---------------------------------------------------------------------------
+# File processing helpers
+# ---------------------------------------------------------------------------
+
+def process_files(word_file, data_dict: dict):
     doc = Document(word_file)
     updated_doc = replace_placeholders(doc, data_dict)
     output = BytesIO()
@@ -57,56 +47,68 @@ def process_files(word_file, data_dict):
     output.seek(0)
     return output, updated_doc
 
-def extract_text_from_docx(docx_obj):
-    return "\n".join([para.text for para in docx_obj.paragraphs])
 
-# ✅ Fungsi terbaru dengan regex fleksibel
-def check_value_consistency_table(text):
-    # Regex untuk angka nominal yang diikuti tanda kurung buka
-    number_pattern = r'Rp\s*([\d\.]+,\d{2})\s*\('
-    
-    # Regex untuk penyebutan nominal dalam huruf kapital, berakhiran "RUPIAH"
-    verbal_block_pattern = r'\(\s*([A-Z\s]+RUPIAH)\s*\)'
+def extract_text_from_docx(docx_obj: Document) -> str:
+    return "\n".join(para.text for para in docx_obj.paragraphs)
 
-    # Ambil daftar angka dan konversi menjadi integer
+
+# ---------------------------------------------------------------------------
+# Konsistensi nominal angka vs terbilang
+# ---------------------------------------------------------------------------
+
+def check_value_consistency_table(text: str) -> pd.DataFrame:
+    number_pattern = r"Rp\s*([\d\.]+,\d{2})\s*\("
+    verbal_block_pattern = r"\(\s*([A-Z\s]+RUPIAH)\s*\)"
+
     numbers = re.findall(number_pattern, text.replace(".", "").replace("Rp", "Rp"))
     number_ints = [int(float(n.replace(",", "."))) for n in numbers]
 
-    # Ambil daftar penyebutan verbal (huruf kapital)
     verbal_blocks = re.findall(verbal_block_pattern, text.upper())
     normalized_verbal = [vb.strip() for vb in verbal_blocks]
 
-    # Gabungkan angka dan kata untuk ditampilkan di tabel
     rows = []
     for angka, kata in zip_longest(number_ints, normalized_verbal, fillvalue="(tidak ditemukan)"):
-        rows.append({
-            "Angka (Rp)": f"Rp {angka:,}".replace(",", ".") if isinstance(angka, int) else angka,
-            "Penyebutan dalam Kata": kata,
-            "Keterangan": "✅ Sesuai" if isinstance(angka, int) and kata != "(tidak ditemukan)" else "⚠️ Tidak cocok"
-        })
+        rows.append(
+            {
+                "Angka (Rp)": f"Rp {angka:,}".replace(",", ".")
+                if isinstance(angka, int)
+                else angka,
+                "Penyebutan dalam Kata": kata,
+                "Keterangan": "✅ Sesuai"
+                if isinstance(angka, int) and kata != "(tidak ditemukan)"
+                else "⚠️ Tidak cocok",
+            }
+        )
 
     return pd.DataFrame(rows)
 
-def highlight_placeholders(text):
+
+def highlight_placeholders(text: str) -> str:
     return re.sub(r"(\{\{.*?\}\})", r"[PLACEHOLDER:\1]", text)
 
-# ========== STREAMLIT UI ==========
+
+# ---------------------------------------------------------------------------
+# Streamlit UI
+# ---------------------------------------------------------------------------
+
 with st.sidebar:
     st.header("📂 Upload Dokumen")
-    word_files = st.file_uploader("Template Laporan (.docx)", type=["docx"], accept_multiple_files=True)
+    word_files = st.file_uploader(
+        "Template Laporan (.docx)", type=["docx"], accept_multiple_files=True
+    )
     excel_file = st.file_uploader("Data Lembar Kerja (.xlsx)", type=["xlsx"])
 
 if excel_file:
-    df_excel = pd.read_excel(excel_file, header=None, skiprows=6, sheet_name="Laporan", engine='openpyxl')
+    df_excel = pd.read_excel(
+        excel_file, header=None, skiprows=6, sheet_name="Laporan", engine="openpyxl"
+    )
     st.subheader("📊 Tabel Data pada Lembar Kerja (edit jika perlu)")
     df_editable = st.data_editor(df_excel, num_rows="dynamic", use_container_width=True)
 
-    data_dict = {}
+    data_dict: dict = {}
     for _, row in df_editable.iterrows():
-        # PERBAIKAN DI SINI: Gunakan .iloc untuk mengambil urutan kolom dengan aman
         key = row.iloc[0]
         value = row.iloc[1]
-        
         if pd.notnull(key):
             data_dict[str(key)] = str(value) if pd.notnull(value) else ""
 
@@ -127,7 +129,7 @@ if excel_file:
                     height=400,
                     key=word_file.name + "_preview",
                     disabled=True,
-                    label_visibility="collapsed"
+                    label_visibility="collapsed",
                 )
 
                 if not consistency_df.empty:
@@ -147,7 +149,7 @@ if excel_file:
                 label="Unduh Dokumen",
                 data=file_obj,
                 file_name=file_name.replace(".docx", "_terisi.docx"),
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             )
         else:
             zip_buffer = BytesIO()
@@ -160,5 +162,5 @@ if excel_file:
                 label="Unduh Semua Dokumen (.zip)",
                 data=zip_buffer,
                 file_name="Semua_Dokumen_Terisi.zip",
-                mime="application/zip"
+                mime="application/zip",
             )
