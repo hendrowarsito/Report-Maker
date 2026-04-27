@@ -1,3 +1,103 @@
+import streamlit as st
+import pandas as pd
+from docx import Document
+from io import BytesIO
+import zipfile
+import re
+from itertools import zip_longest
+
+st.set_page_config(page_title="Template Word Otomatis", layout="wide")
+st.markdown("# SRR Kalibata Report Maker")
+
+
+# ---------------------------------------------------------------------------
+# Paragraph-level placeholder replacement
+# ---------------------------------------------------------------------------
+
+def _replace_cross_run_placeholder(para, placeholder: str, value: str):
+    """
+    Ganti placeholder yang terpecah di beberapa run berbeda.
+    Formatting (bold/italic/dll) setiap run tetap dipertahankan:
+    - run di awal placeholder mempertahankan formatnya sendiri
+    - run di tengah yang terhapus tidak mempengaruhi run lain
+    - run setelah placeholder tetap utuh dengan formatnya
+    """
+    runs = para.runs
+    if not runs:
+        return
+
+    texts = [run.text for run in runs]
+    full_text = "".join(texts)
+
+    if placeholder not in full_text:
+        return
+
+    # Hitung posisi kumulatif setiap run
+    cum_start = []
+    pos = 0
+    for t in texts:
+        cum_start.append(pos)
+        pos += len(t)
+
+    ph_start = full_text.find(placeholder)
+    ph_end = ph_start + len(placeholder)
+
+    # Cari run yang mengandung awal dan akhir placeholder
+    start_run_idx = None
+    end_run_idx = None
+    for i, cs in enumerate(cum_start):
+        ce = cs + len(runs[i].text)
+        if cs <= ph_start < ce:
+            start_run_idx = i
+        if cs < ph_end <= ce:
+            end_run_idx = i
+
+    # Tangani placeholder yang tepat di batas antar run
+    if end_run_idx is None:
+        for i, cs in enumerate(cum_start):
+            if cs + len(runs[i].text) == ph_end:
+                end_run_idx = i
+                break
+
+    if start_run_idx is None or end_run_idx is None or start_run_idx == end_run_idx:
+        return
+
+    # Teks sebelum placeholder di run awal
+    before = texts[start_run_idx][: ph_start - cum_start[start_run_idx]]
+    # Teks setelah placeholder di run akhir
+    after = texts[end_run_idx][ph_end - cum_start[end_run_idx] :]
+
+    # Terapkan: run awal mendapat teks sebelum + nilai pengganti
+    runs[start_run_idx].text = before + value
+    # Run akhir hanya menyimpan teks sesudah placeholder (formatting-nya tetap)
+    runs[end_run_idx].text = after
+    # Run di tengah dikosongkan (formatting mereka tidak relevan)
+    for i in range(start_run_idx + 1, end_run_idx):
+        runs[i].text = ""
+
+
+def replace_placeholders_in_paragraph(para, data: dict):
+    """
+    Ganti semua placeholder di paragraf.
+
+    Catatan: meng-assign run.text di python-docx HANYA mengubah konten teks
+    (<w:t>) tanpa menyentuh properti run (<w:rPr>), sehingga bold/italic/
+    underline/font/warna tetap terjaga secara otomatis — tidak perlu
+    disimpan dan dikembalikan secara manual (yang malah bisa memicu crash
+    jika run tidak punya warna eksplisit).
+    """
+    for key, value in data.items():
+        placeholder = f"{{{{{key}}}}}"
+
+        # Tahap 1: ganti dalam satu run (kasus normal — formatting terjaga otomatis)
+        for run in para.runs:
+            if placeholder in run.text:
+                run.text = run.text.replace(placeholder, str(value))
+
+        # Tahap 2: tangani placeholder yang terpecah di beberapa run
+        if placeholder in "".join(r.text for r in para.runs):
+            _replace_cross_run_placeholder(para, placeholder, str(value))
+
     return para
 
 
