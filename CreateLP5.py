@@ -14,6 +14,144 @@ st.markdown("# SRR Kalibata Report Maker")
 
 
 # =============================================================================
+# Konversi angka ke terbilang Rupiah (murni Python, tanpa API)
+# =============================================================================
+
+_SATUAN = [
+    "", "satu", "dua", "tiga", "empat", "lima",
+    "enam", "tujuh", "delapan", "sembilan",
+]
+_BELASAN = [
+    "sepuluh", "sebelas", "dua belas", "tiga belas", "empat belas",
+    "lima belas", "enam belas", "tujuh belas", "delapan belas", "sembilan belas",
+]
+
+
+def _terbilang_bilangan(n: int) -> str:
+    """Rekursif: ubah bilangan bulat positif ke kata Indonesia (huruf kecil)."""
+    if n == 0:
+        return ""
+
+    parts: list[str] = []
+
+    if n >= 1_000_000_000_000:
+        t, n = divmod(n, 1_000_000_000_000)
+        parts.append(_terbilang_bilangan(t) + " triliun")
+
+    if n >= 1_000_000_000:
+        m, n = divmod(n, 1_000_000_000)
+        parts.append(_terbilang_bilangan(m) + " miliar")
+
+    if n >= 1_000_000:
+        j, n = divmod(n, 1_000_000)
+        parts.append(_terbilang_bilangan(j) + " juta")
+
+    if n >= 1_000:
+        r, n = divmod(n, 1_000)
+        parts.append("seribu" if r == 1 else _terbilang_bilangan(r) + " ribu")
+
+    if n >= 100:
+        h, n = divmod(n, 100)
+        parts.append("seratus" if h == 1 else _SATUAN[h] + " ratus")
+
+    if n >= 20:
+        p, n = divmod(n, 10)
+        parts.append(_SATUAN[p] + " puluh")
+        if n:
+            parts.append(_SATUAN[n])
+    elif n >= 10:
+        parts.append(_BELASAN[n - 10])
+    elif n > 0:
+        parts.append(_SATUAN[n])
+
+    return " ".join(parts)
+
+
+def angka_ke_terbilang(n: int) -> str:
+    """
+    Ubah bilangan bulat (nilai Rupiah) ke terbilang huruf kapital.
+    Contoh: 200_000_000 → 'DUA RATUS JUTA RUPIAH'
+    """
+    if n == 0:
+        return "NOL RUPIAH"
+    prefix = "MINUS " if n < 0 else ""
+    return (prefix + _terbilang_bilangan(abs(n))).upper() + " RUPIAH"
+
+
+def format_rupiah(n: int) -> str:
+    """
+    Format bilangan bulat ke string Rupiah Indonesia.
+    Contoh: 200_000_000 → 'Rp 200.000.000,00'
+    """
+    ribuan = f"{n:,}".replace(",", ".")
+    return f"Rp {ribuan},00"
+
+
+def _parse_ke_int(nilai) -> int | None:
+    """
+    Coba parsing berbagai format nilai ke bilangan bulat.
+    Mengembalikan None jika bukan angka atau terlalu kecil untuk jadi nominal Rupiah.
+    Format yang didukung: int, float, "200000000", "Rp 200.000.000,00", "200.000.000,00"
+    """
+    if isinstance(nilai, (int, float)):
+        result = int(round(float(nilai)))
+        return result if result >= 1 else None
+
+    s = str(nilai).strip()
+    # Hapus prefix Rp / rp dan spasi
+    s = re.sub(r"(?i)rp\.?\s*", "", s).strip()
+    # Format Indonesia: titik = pemisah ribuan, koma = desimal → ubah ke float standar
+    if re.search(r"\d\.\d{3}", s):          # ada pemisah ribuan dengan titik
+        s = s.replace(".", "").replace(",", ".")
+    else:
+        s = s.replace(",", ".")
+
+    s = re.sub(r"[^\d.]", "", s)           # buang karakter non-numerik sisa
+    if not s:
+        return None
+    try:
+        result = int(round(float(s)))
+        return result if result >= 1 else None
+    except ValueError:
+        return None
+
+
+def generate_auto_terbilang(data_dict: dict) -> dict[str, dict]:
+    """
+    Buat pasangan KEY_TERBILANG dan KEY_FORMAT untuk setiap entri numerik
+    di data_dict yang belum punya padanannya.
+
+    Kembalikan dict berisi entri baru saja (untuk ditampilkan di UI),
+    format: { "KEY": {"angka": int, "terbilang": str, "format_rp": str} }
+    """
+    tambahan: dict[str, dict] = {}
+
+    for key, val in data_dict.items():
+        if key.endswith(("_TERBILANG", "_FORMAT")):
+            continue                            # jangan proses hasil generate
+
+        angka = _parse_ke_int(val)
+        if angka is None:
+            continue
+
+        tb_key = key + "_TERBILANG"
+        fmt_key = key + "_FORMAT"
+
+        info = {
+            "angka":      angka,
+            "terbilang":  angka_ke_terbilang(angka),
+            "format_rp":  format_rupiah(angka),
+        }
+
+        if tb_key not in data_dict:
+            tambahan[tb_key] = info
+        if fmt_key not in data_dict:
+            tambahan[fmt_key] = info
+
+    return tambahan
+
+
+# =============================================================================
 # Paragraph-level placeholder replacement — berbasis XML langsung
 # =============================================================================
 #
@@ -509,6 +647,43 @@ if excel_file:
         value = row.iloc[1]
         if pd.notnull(key):
             data_dict[str(key)] = str(value) if pd.notnull(value) else ""
+
+    # ---------------------------------------------------------------------------
+    # Auto-generate terbilang & format Rupiah untuk semua nilai numerik
+    # ---------------------------------------------------------------------------
+    auto_tb = generate_auto_terbilang(data_dict)
+
+    if auto_tb:
+        # Masukkan ke data_dict agar placeholder di template terganti
+        for tb_key, info in auto_tb.items():
+            if tb_key.endswith("_TERBILANG"):
+                data_dict[tb_key] = info["terbilang"]
+            elif tb_key.endswith("_FORMAT"):
+                data_dict[tb_key] = info["format_rp"]
+
+        # Tampilkan ringkasan di UI
+        with st.expander("🔢 Terbilang & Format Rupiah yang Dibuat Otomatis", expanded=False):
+            st.caption(
+                "Placeholder berikut dibuat otomatis dari nilai numerik di Excel. "
+                "Tambahkan `{{KEY_TERBILANG}}` atau `{{KEY_FORMAT}}` di template Word untuk menggunakannya."
+            )
+            # Kumpulkan per key sumber (tanpa suffix)
+            sumber_keys = {
+                k.removesuffix("_TERBILANG").removesuffix("_FORMAT")
+                for k in auto_tb
+            }
+            rows_tb = []
+            for src in sorted(sumber_keys):
+                tb_key  = src + "_TERBILANG"
+                fmt_key = src + "_FORMAT"
+                info    = auto_tb.get(tb_key) or auto_tb.get(fmt_key)
+                rows_tb.append({
+                    "Placeholder Sumber": f"{{{{{src}}}}}",
+                    "Nilai Asli":         str(data_dict.get(src, "")),
+                    "{{KEY_FORMAT}}":     data_dict.get(fmt_key, "—"),
+                    "{{KEY_TERBILANG}}":  data_dict.get(tb_key, "—"),
+                })
+            st.dataframe(pd.DataFrame(rows_tb), use_container_width=True)
 
     # ---------------------------------------------------------------------------
     # Fitur AI: Analisis Struktur Template
