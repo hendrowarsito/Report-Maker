@@ -90,7 +90,11 @@ def format_rupiah(n: int) -> str:
 def _parse_ke_int(nilai) -> int | None:
     """
     Coba parsing berbagai format nilai ke bilangan bulat.
-    Mengembalikan None jika bukan angka atau terlalu kecil untuk jadi nominal Rupiah.
+    Mengembalikan None jika:
+      - bukan angka
+      - mengandung huruf selain prefix "Rp" (misal: tanggal, nama, %)
+      - hasil < 1
+
     Format yang didukung: int, float, "200000000", "Rp 200.000.000,00", "200.000.000,00"
     """
     if isinstance(nilai, (int, float)):
@@ -98,15 +102,22 @@ def _parse_ke_int(nilai) -> int | None:
         return result if result >= 1 else None
 
     s = str(nilai).strip()
-    # Hapus prefix Rp / rp dan spasi
-    s = re.sub(r"(?i)rp\.?\s*", "", s).strip()
-    # Format Indonesia: titik = pemisah ribuan, koma = desimal → ubah ke float standar
-    if re.search(r"\d\.\d{3}", s):          # ada pemisah ribuan dengan titik
+
+    # Tolak string yang mengandung huruf di luar prefix Rp, atau simbol non-numerik
+    # Contoh yang DITOLAK: "28 April 2026", "Unit A", "20%", "n/a", "1.5x"
+    tanpa_rp = re.sub(r"(?i)^\s*rp\.?\s*", "", s).strip()
+    if re.search(r"[a-zA-Z%]", tanpa_rp):
+        return None
+
+    # Hapus prefix Rp
+    s = tanpa_rp
+    # Format Indonesia: titik = pemisah ribuan, koma = desimal
+    if re.search(r"\d\.\d{3}", s):
         s = s.replace(".", "").replace(",", ".")
     else:
         s = s.replace(",", ".")
 
-    s = re.sub(r"[^\d.]", "", s)           # buang karakter non-numerik sisa
+    s = re.sub(r"[^\d.]", "", s)
     if not s:
         return None
     try:
@@ -116,32 +127,55 @@ def _parse_ke_int(nilai) -> int | None:
         return None
 
 
-def generate_auto_terbilang(data_dict: dict) -> dict[str, dict]:
+def format_angka_indonesia(n: int) -> str:
     """
-    Buat pasangan KEY_TERBILANG dan KEY_FORMAT untuk setiap entri numerik
-    di data_dict yang belum punya padanannya.
+    Format angka ke gaya Indonesia tanpa prefix Rp.
+    Contoh: 200_000_000 → '200.000.000,00'
+    Digunakan ketika template sudah hardcode 'Rp ' sebelum placeholder.
+    """
+    return f"{n:,}".replace(",", ".") + ",00"
 
-    Kembalikan dict berisi entri baru saja (untuk ditampilkan di UI),
-    format: { "KEY": {"angka": int, "terbilang": str, "format_rp": str} }
+
+def generate_auto_terbilang(
+    data_dict: dict,
+    terbilang_map: dict[str, str] | None = None,
+) -> dict[str, dict]:
     """
+    Buat entri terbilang & format Rupiah otomatis untuk setiap nilai numerik.
+
+    terbilang_map  — pemetaan eksplisit dari key sumber ke nama placeholder
+                     terbilang yang diinginkan, berasal dari kolom ke-3 Excel.
+                     Contoh: {"NP_nominal": "NP_kalimat_cap"}
+                     Jika None atau key tidak ada di map, fallback ke
+                     suffix _TERBILANG / _FORMAT.
+
+    Kembalikan dict entri baru saja (untuk ditampilkan di UI):
+      { "NP_kalimat_cap": {"sumber": "NP_nominal", "angka": 200000000,
+                           "terbilang": "DUA RATUS JUTA RUPIAH",
+                           "format_rp": "Rp 200.000.000,00"} }
+    """
+    terbilang_map = terbilang_map or {}
     tambahan: dict[str, dict] = {}
 
     for key, val in data_dict.items():
         if key.endswith(("_TERBILANG", "_FORMAT")):
-            continue                            # jangan proses hasil generate
+            continue
 
         angka = _parse_ke_int(val)
         if angka is None:
             continue
 
-        tb_key = key + "_TERBILANG"
-        fmt_key = key + "_FORMAT"
-
         info = {
-            "angka":      angka,
-            "terbilang":  angka_ke_terbilang(angka),
-            "format_rp":  format_rupiah(angka),
+            "sumber":       key,
+            "angka":        angka,
+            "terbilang":    angka_ke_terbilang(angka),
+            "format_rp":    format_rupiah(angka),
+            "format_angka": format_angka_indonesia(angka),
         }
+
+        # Tentukan key terbilang: eksplisit dari map atau fallback suffix
+        tb_key  = terbilang_map.get(key, key + "_TERBILANG")
+        fmt_key = key + "_FORMAT"
 
         if tb_key not in data_dict:
             tambahan[tb_key] = info
@@ -648,42 +682,64 @@ if excel_file:
         if pd.notnull(key):
             data_dict[str(key)] = str(value) if pd.notnull(value) else ""
 
+    # Kolom ketiga (opsional): nama placeholder terbilang yang diinginkan
+    # Contoh baris Excel: NP_nominal | 200000000 | NP_kalimat_cap
+    terbilang_map: dict[str, str] = {}
+    if df_editable.shape[1] >= 3:
+        for _, row in df_editable.iterrows():
+            key = row.iloc[0]
+            tb_target = row.iloc[2]
+            if pd.notnull(key) and pd.notnull(tb_target) and str(tb_target).strip():
+                terbilang_map[str(key)] = str(tb_target).strip()
+
     # ---------------------------------------------------------------------------
     # Auto-generate terbilang & format Rupiah untuk semua nilai numerik
     # ---------------------------------------------------------------------------
-    auto_tb = generate_auto_terbilang(data_dict)
+    auto_tb = generate_auto_terbilang(data_dict, terbilang_map)
 
     if auto_tb:
-        # Masukkan ke data_dict agar placeholder di template terganti
+        # Kelompokkan per key sumber agar tidak duplikat
+        seen_src: set[str] = set()
+        rows_tb = []
+
         for tb_key, info in auto_tb.items():
-            if tb_key.endswith("_TERBILANG"):
-                data_dict[tb_key] = info["terbilang"]
-            elif tb_key.endswith("_FORMAT"):
+            src = info["sumber"]
+
+            # Perbarui nilai source key: angka mentah → format Indonesia tanpa "Rp"
+            # Sehingga template "Rp {{NP_nominal}}" menghasilkan "Rp 200.000.000,00"
+            data_dict[src] = info["format_angka"]
+
+            # Isi key terbilang (nama bisa bebas, dari map atau suffix _TERBILANG)
+            if tb_key.endswith("_FORMAT"):
                 data_dict[tb_key] = info["format_rp"]
+            else:
+                data_dict[tb_key] = info["terbilang"]
+
+            # Isi _FORMAT selalu tersedia
+            fmt_key = src + "_FORMAT"
+            if fmt_key not in data_dict:
+                data_dict[fmt_key] = info["format_rp"]
+
+            if src in seen_src:
+                continue
+            seen_src.add(src)
+
+            rows_tb.append({
+                "Placeholder":           f"{{{{{src}}}}}",
+                "Nilai → Diformat":      info["format_angka"],
+                f"{{{{{src}_FORMAT}}}}" : info["format_rp"],
+                "Placeholder Terbilang": f"{{{{{tb_key}}}}}",
+                "Terbilang":             info["terbilang"],
+            })
 
         # Tampilkan ringkasan di UI
-        with st.expander("🔢 Terbilang & Format Rupiah yang Dibuat Otomatis", expanded=False):
+        with st.expander("🔢 Terbilang & Format Rupiah yang Dibuat Otomatis", expanded=True):
             st.caption(
-                "Placeholder berikut dibuat otomatis dari nilai numerik di Excel. "
-                "Tambahkan `{{KEY_TERBILANG}}` atau `{{KEY_FORMAT}}` di template Word untuk menggunakannya."
+                "Kolom ke-3 Excel (opsional) → nama placeholder terbilang kustom. "
+                "Kosong = nama otomatis `KEY_TERBILANG`."
             )
-            # Kumpulkan per key sumber (tanpa suffix)
-            sumber_keys = {
-                k.removesuffix("_TERBILANG").removesuffix("_FORMAT")
-                for k in auto_tb
-            }
-            rows_tb = []
-            for src in sorted(sumber_keys):
-                tb_key  = src + "_TERBILANG"
-                fmt_key = src + "_FORMAT"
-                info    = auto_tb.get(tb_key) or auto_tb.get(fmt_key)
-                rows_tb.append({
-                    "Placeholder Sumber": f"{{{{{src}}}}}",
-                    "Nilai Asli":         str(data_dict.get(src, "")),
-                    "{{KEY_FORMAT}}":     data_dict.get(fmt_key, "—"),
-                    "{{KEY_TERBILANG}}":  data_dict.get(tb_key, "—"),
-                })
-            st.dataframe(pd.DataFrame(rows_tb), use_container_width=True)
+            if rows_tb:
+                st.dataframe(pd.DataFrame(rows_tb), use_container_width=True)
 
     # ---------------------------------------------------------------------------
     # Fitur AI: Analisis Struktur Template
