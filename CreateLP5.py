@@ -653,6 +653,49 @@ with st.sidebar:
     skiprows = st.number_input("Lewati baris pertama (skiprows)", min_value=0, value=6, step=1)
 
     st.divider()
+    st.header("🔢 Buat Terbilang")
+    st.caption("Daftarkan key yang perlu dibuatkan terbilang otomatis.")
+
+    if "tb_rows" not in st.session_state:
+        st.session_state.tb_rows = [{"src": "", "caps": "", "title": ""}]
+
+    tb_rows_ui: list[dict] = []
+    for i, cfg in enumerate(st.session_state.tb_rows):
+        st.markdown(f"**Key #{i + 1}**")
+        src = st.text_input(
+            "Key sumber", value=cfg["src"], key=f"tb_src_{i}",
+            placeholder="NP_nominal",
+            label_visibility="collapsed",
+        )
+        c1, c2 = st.columns(2)
+        caps  = c1.text_input(
+            "ALL CAPS", value=cfg["caps"], key=f"tb_caps_{i}",
+            placeholder="NP_kalimat_cap",
+            label_visibility="collapsed",
+        )
+        title = c2.text_input(
+            "Title Case", value=cfg["title"], key=f"tb_title_{i}",
+            placeholder="NP_kalimat",
+            label_visibility="collapsed",
+        )
+        tb_rows_ui.append({"src": src.strip(), "caps": caps.strip(), "title": title.strip()})
+
+    if st.button("＋ Tambah key"):
+        st.session_state.tb_rows = tb_rows_ui + [{"src": "", "caps": "", "title": ""}]
+        st.rerun()
+    else:
+        st.session_state.tb_rows = tb_rows_ui
+
+    # Bangun map dari input sidebar (hanya baris dengan key sumber yang diisi)
+    terbilang_map_sidebar: dict[str, str] = {}
+    title_map_sidebar:     dict[str, str] = {}
+    for cfg in tb_rows_ui:
+        if not cfg["src"]:
+            continue
+        terbilang_map_sidebar[cfg["src"]] = cfg["caps"]  or cfg["src"] + "_TERBILANG"
+        title_map_sidebar[cfg["src"]]     = cfg["title"] or cfg["src"] + "_TERBILANG_TITLE"
+
+    st.divider()
     st.header("🔄 Find & Replace")
     st.caption("Ganti kata langsung di dokumen — tidak perlu placeholder.")
 
@@ -702,30 +745,12 @@ if excel_file:
         if pd.notnull(key):
             data_dict[str(key)] = str(value) if pd.notnull(value) else ""
 
-    # Kolom ke-3 (opsional): nama placeholder terbilang ALL CAPS
-    # Kolom ke-4 (opsional): nama placeholder terbilang Title Case
-    # Contoh: NP_nominal | 200000000 | NP_kalimat_cap | NP_kalimat
-    terbilang_map: dict[str, str] = {}
-    title_map:     dict[str, str] = {}
-
-    def _col_val(row, idx: int) -> str:
-        """Ambil nilai kolom ke-idx jika ada, kembalikan string kosong jika tidak."""
-        if df_editable.shape[1] > idx:
-            v = row.iloc[idx]
-            return str(v).strip() if pd.notnull(v) else ""
-        return ""
-
-    for _, row in df_editable.iterrows():
-        key = row.iloc[0]
-        if pd.notnull(key):
-            k = str(key)
-            if col3 := _col_val(row, 2):
-                terbilang_map[k] = col3
-            if col4 := _col_val(row, 3):
-                title_map[k] = col4
+    # Gunakan map dari sidebar (bukan dari kolom Excel — lebih eksplisit)
+    terbilang_map = terbilang_map_sidebar
+    title_map     = title_map_sidebar
 
     # ---------------------------------------------------------------------------
-    # Auto-generate terbilang & format Rupiah untuk semua nilai numerik
+    # Auto-generate terbilang & format Rupiah — hanya untuk key yang didaftarkan
     # ---------------------------------------------------------------------------
     auto_tb = generate_auto_terbilang(data_dict, terbilang_map, title_map)
 
