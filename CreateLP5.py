@@ -152,27 +152,33 @@ def generate_auto_terbilang(
     title_map: dict[str, str] | None = None,
 ) -> dict[str, dict]:
     """
-    Buat entri terbilang & format Rupiah otomatis untuk setiap nilai numerik.
+    Buat terbilang HANYA untuk key yang eksplisit ditandai di kolom ke-3
+    atau ke-4 Excel. Key yang tidak ada di kedua map tidak diproses sama sekali
+    — sehingga angka seperti luas_tanah, kurs, dsb. tidak ikut diubah.
 
-    terbilang_map  — kolom ke-3 Excel: nama placeholder ALL CAPS.
+    terbilang_map  — kolom ke-3: nama placeholder ALL CAPS
                      Contoh: {"NP_nominal": "NP_kalimat_cap"}
-                     Fallback: KEY_TERBILANG
-
-    title_map      — kolom ke-4 Excel: nama placeholder Title Case.
+    title_map      — kolom ke-4: nama placeholder Title Case
                      Contoh: {"NP_nominal": "NP_kalimat"}
-                     Fallback: KEY_TERBILANG_TITLE
 
-    Untuk setiap nilai numerik dihasilkan otomatis:
-      • KEY_FORMAT         → "Rp 200.000.000,00"
-      • KEY_TERBILANG      → "DUA RATUS JUTA RUPIAH"   (atau nama dari col-3)
-      • KEY_TERBILANG_TITLE → "Dua Ratus Juta Rupiah"  (atau nama dari col-4)
+    Untuk setiap key yang ditandai dihasilkan:
+      • source key          → diformat Indonesia: "200.000.000,00"
+      • KEY_FORMAT          → "Rp 200.000.000,00"
+      • placeholder col-3   → "DUA RATUS JUTA RUPIAH"
+      • placeholder col-4   → "Dua Ratus Juta Rupiah"
     """
     terbilang_map = terbilang_map or {}
     title_map     = title_map     or {}
     tambahan: dict[str, dict] = {}
 
-    for key, val in data_dict.items():
-        if key.endswith(("_TERBILANG", "_TERBILANG_TITLE", "_FORMAT")):
+    # Hanya proses key yang ada di salah satu map (opt-in)
+    keys_ditandai = set(terbilang_map) | set(title_map)
+    if not keys_ditandai:
+        return tambahan
+
+    for key in keys_ditandai:
+        val = data_dict.get(key)
+        if val is None:
             continue
 
         angka = _parse_ke_int(val)
@@ -188,13 +194,13 @@ def generate_auto_terbilang(
             "format_angka":    format_angka_indonesia(angka),
         }
 
+        fmt_key      = key + "_FORMAT"
         tb_key       = terbilang_map.get(key, key + "_TERBILANG")
         tb_title_key = title_map.get(key,     key + "_TERBILANG_TITLE")
-        fmt_key      = key + "_FORMAT"
 
+        if fmt_key      not in data_dict: tambahan[fmt_key]      = info
         if tb_key       not in data_dict: tambahan[tb_key]       = info
         if tb_title_key not in data_dict: tambahan[tb_title_key] = info
-        if fmt_key      not in data_dict: tambahan[fmt_key]      = info
 
     return tambahan
 
@@ -724,54 +730,51 @@ if excel_file:
     auto_tb = generate_auto_terbilang(data_dict, terbilang_map, title_map)
 
     if auto_tb:
-        seen_src: set[str] = set()
-        rows_tb  = []
-
+        # Kumpulkan satu info per key sumber (untuk UI)
+        seen_src: dict[str, dict] = {}
         for tb_key, info in auto_tb.items():
             src = info["sumber"]
 
-            # Perbarui source key: angka mentah → format Indonesia tanpa "Rp"
-            data_dict[src] = info["format_angka"]
-
-            # Tentukan isi berdasarkan jenis key
+            # Isi nilai ke data_dict
             if tb_key.endswith("_FORMAT"):
                 data_dict[tb_key] = info["format_rp"]
-            elif tb_key.endswith("_TERBILANG_TITLE") or tb_key == title_map.get(src):
+            elif tb_key == title_map.get(src) or tb_key.endswith("_TERBILANG_TITLE"):
                 data_dict[tb_key] = info["terbilang_title"]
             else:
                 data_dict[tb_key] = info["terbilang"]
 
-            # _FORMAT selalu tersedia
-            fmt_key = src + "_FORMAT"
-            if fmt_key not in data_dict:
-                data_dict[fmt_key] = info["format_rp"]
+            # Perbarui source key → format Indonesia (hanya key yang ditandai)
+            data_dict[src] = info["format_angka"]
 
-            if src in seen_src:
-                continue
-            seen_src.add(src)
+            seen_src[src] = info   # simpan untuk UI
 
+        rows_tb = []
+        for src, info in seen_src.items():
             cap_key   = terbilang_map.get(src, src + "_TERBILANG")
             title_key = title_map.get(src,     src + "_TERBILANG_TITLE")
-            # Gunakan nama kolom TETAP agar DataFrame tidak memunculkan None
             rows_tb.append({
-                "Sumber {{...}}":               f"{{{{{src}}}}}",
-                "Diformat (tanpa Rp)":          info["format_angka"],
-                "Placeholder _FORMAT":          "{{" + src + "_FORMAT}}",
-                "Placeholder ALL CAPS":         f"{{{{{cap_key}}}}}",
-                "Isi ALL CAPS":                 info["terbilang"],
-                "Placeholder Title Case":       f"{{{{{title_key}}}}}",
-                "Isi Title Case":               info["terbilang_title"],
+                "Sumber":                 f"{{{{{src}}}}}",
+                "Diformat (tanpa Rp)":    info["format_angka"],
+                "Placeholder _FORMAT":    "{{" + src + "_FORMAT}}",
+                "Placeholder ALL CAPS":   f"{{{{{cap_key}}}}}",
+                "Isi ALL CAPS":           info["terbilang"],
+                "Placeholder Title Case": f"{{{{{title_key}}}}}",
+                "Isi Title Case":         info["terbilang_title"],
             })
 
         with st.expander("🔢 Terbilang & Format Rupiah yang Dibuat Otomatis", expanded=True):
             st.caption(
-                "Kolom ke-3 Excel → placeholder ALL CAPS | "
-                "Kolom ke-4 Excel → placeholder Title Case | "
-                "Kosong = nama otomatis `KEY_TERBILANG` / `KEY_TERBILANG_TITLE`. "
-                "Copy nama placeholder dari kolom di bawah, lalu tempel ke template Word."
+                "Hanya key yang ditandai di kolom ke-3 atau ke-4 Excel yang diproses. "
+                "Copy nama placeholder dari kolom di bawah ke template Word."
             )
             if rows_tb:
                 st.dataframe(pd.DataFrame(rows_tb), use_container_width=True)
+            else:
+                st.info(
+                    "Belum ada key yang ditandai. "
+                    "Isi kolom ke-3 Excel dengan nama placeholder terbilang "
+                    "(contoh: untuk baris `NP_nominal`, isi kolom ke-3 dengan `NP_kalimat_cap`)."
+                )
 
     # ---------------------------------------------------------------------------
     # Fitur AI: Analisis Struktur Template
