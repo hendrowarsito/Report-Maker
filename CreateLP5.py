@@ -750,22 +750,25 @@ if excel_file:
                 continue
             seen_src.add(src)
 
-            # Cari key title case untuk baris ini
-            title_key = title_map.get(src, src + "_TERBILANG_TITLE")
             cap_key   = terbilang_map.get(src, src + "_TERBILANG")
+            title_key = title_map.get(src,     src + "_TERBILANG_TITLE")
+            # Gunakan nama kolom TETAP agar DataFrame tidak memunculkan None
             rows_tb.append({
-                "Sumber":                    f"{{{{{src}}}}}",
-                "Diformat (tanpa Rp)":       info["format_angka"],
-                "KEY_FORMAT":                info["format_rp"],
-                f"Kapital ({cap_key})":       info["terbilang"],
-                f"Title Case ({title_key})":  info["terbilang_title"],
+                "Sumber {{...}}":               f"{{{{{src}}}}}",
+                "Diformat (tanpa Rp)":          info["format_angka"],
+                "Placeholder _FORMAT":          "{{" + src + "_FORMAT}}",
+                "Placeholder ALL CAPS":         f"{{{{{cap_key}}}}}",
+                "Isi ALL CAPS":                 info["terbilang"],
+                "Placeholder Title Case":       f"{{{{{title_key}}}}}",
+                "Isi Title Case":               info["terbilang_title"],
             })
 
         with st.expander("🔢 Terbilang & Format Rupiah yang Dibuat Otomatis", expanded=True):
             st.caption(
                 "Kolom ke-3 Excel → placeholder ALL CAPS | "
                 "Kolom ke-4 Excel → placeholder Title Case | "
-                "Kosong = nama otomatis `KEY_TERBILANG` / `KEY_TERBILANG_TITLE`."
+                "Kosong = nama otomatis `KEY_TERBILANG` / `KEY_TERBILANG_TITLE`. "
+                "Copy nama placeholder dari kolom di bawah, lalu tempel ke template Word."
             )
             if rows_tb:
                 st.dataframe(pd.DataFrame(rows_tb), use_container_width=True)
