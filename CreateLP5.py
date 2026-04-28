@@ -14,75 +14,104 @@ st.markdown("# SRR Kalibata Report Maker")
 
 
 # =============================================================================
-# Paragraph-level placeholder replacement
+# Paragraph-level placeholder replacement — berbasis XML langsung
 # =============================================================================
+#
+# MENGAPA XML, BUKAN para.runs?
+# para.runs hanya mengembalikan <w:r> anak-langsung dari <w:p>.
+# Placeholder bisa berada di dalam elemen pembungkus yang TIDAK terlihat oleh
+# para.runs, antara lain:
+#   • <w:hyperlink>   — teks yang merupakan hyperlink
+#   • <w:ins>         — teks hasil tracked-change (insertion)
+#   • <w:sdt>         — content control (structured document tag)
+# Dengan para._element.iter(W_T) kita mendapatkan SEMUA <w:t> di seluruh
+# sub-pohon XML, sehingga tidak ada placeholder yang terlewat.
+# Karena kita hanya mengubah .text pada elemen <w:t> (bukan <w:rPr>),
+# semua formatting (bold/italic/warna/font) tetap terjaga otomatis.
+#
+_W_NS  = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+_W_T   = f"{{{_W_NS}}}t"
+_XML_SPACE = "{http://www.w3.org/XML/1998/namespace}space"
 
-def _replace_cross_run_placeholder(para, placeholder: str, value: str):
+
+def _set_t_text(t_elem, text: str):
+    """Tulis teks ke elemen <w:t>, pasang xml:space="preserve" jika ada spasi di tepi."""
+    t_elem.text = text
+    if text and (text[0] == " " or text[-1] == " "):
+        t_elem.set(_XML_SPACE, "preserve")
+
+
+def _replace_in_para_xml(para, placeholder: str, value: str) -> int:
     """
-    Ganti placeholder yang terpecah di beberapa run berbeda.
-    Formatting (bold/italic/dll) setiap run tetap dipertahankan.
+    Ganti semua kemunculan placeholder di paragraf secara langsung via XML.
+    Menangani: run normal, hyperlink, tracked-change, content-control,
+               dan placeholder yang terpecah di beberapa elemen <w:t>.
+    Kembalikan jumlah penggantian yang dilakukan.
     """
-    runs = para.runs
-    if not runs:
-        return
+    t_elems = list(para._element.iter(_W_T))
+    if not t_elems:
+        return 0
 
-    texts = [run.text for run in runs]
-    full_text = "".join(texts)
+    count = 0
 
-    if placeholder not in full_text:
-        return
+    # Babak 1: ganti dalam satu elemen <w:t> (kasus paling umum)
+    for t in t_elems:
+        txt = t.text or ""
+        if placeholder in txt:
+            count += txt.count(placeholder)
+            _set_t_text(t, txt.replace(placeholder, value))
 
-    cum_start = []
-    pos = 0
-    for t in texts:
-        cum_start.append(pos)
-        pos += len(t)
+    # Babak 2: ganti placeholder yang terpecah di beberapa <w:t>
+    # Loop sampai tidak ada lagi kemunculan (menangani beberapa kejadian sekaligus)
+    for _ in range(len(t_elems)):           # batas atas iterasi yang aman
+        texts    = [t.text or "" for t in t_elems]
+        full     = "".join(texts)
+        if placeholder not in full:
+            break
 
-    ph_start = full_text.find(placeholder)
-    ph_end = ph_start + len(placeholder)
+        ph_start = full.index(placeholder)
+        ph_end   = ph_start + len(placeholder)
 
-    start_run_idx = None
-    end_run_idx = None
-    for i, cs in enumerate(cum_start):
-        ce = cs + len(runs[i].text)
-        if cs <= ph_start < ce:
-            start_run_idx = i
-        if cs < ph_end <= ce:
-            end_run_idx = i
+        # Bangun posisi kumulatif setiap elemen
+        cum, cum_pos = 0, []
+        for txt in texts:
+            cum_pos.append(cum)
+            cum += len(txt)
 
-    if end_run_idx is None:
-        for i, cs in enumerate(cum_start):
-            if cs + len(runs[i].text) == ph_end:
-                end_run_idx = i
-                break
+        s_idx = e_idx = None
+        for i, (cp, txt) in enumerate(zip(cum_pos, texts)):
+            cp_end = cp + len(txt)
+            if cp <= ph_start < cp_end:
+                s_idx = i
+            if cp < ph_end <= cp_end:
+                e_idx = i
 
-    if start_run_idx is None or end_run_idx is None or start_run_idx == end_run_idx:
-        return
+        # Tangani placeholder yang tepat berakhir di batas elemen
+        if e_idx is None:
+            for i, cp in enumerate(cum_pos):
+                if cp + len(texts[i]) == ph_end:
+                    e_idx = i
+                    break
 
-    before = texts[start_run_idx][: ph_start - cum_start[start_run_idx]]
-    after = texts[end_run_idx][ph_end - cum_start[end_run_idx] :]
+        if s_idx is None or e_idx is None or s_idx == e_idx:
+            break   # tidak dapat diselesaikan, hentikan agar tidak infinite loop
 
-    runs[start_run_idx].text = before + value
-    runs[end_run_idx].text = after
-    for i in range(start_run_idx + 1, end_run_idx):
-        runs[i].text = ""
+        before = texts[s_idx][: ph_start - cum_pos[s_idx]]
+        after  = texts[e_idx][ph_end   - cum_pos[e_idx] :]
+
+        _set_t_text(t_elems[s_idx], before + value)
+        _set_t_text(t_elems[e_idx], after)
+        for i in range(s_idx + 1, e_idx):
+            t_elems[i].text = ""
+
+        count += 1
+
+    return count
 
 
 def replace_placeholders_in_paragraph(para, data: dict):
-    """
-    Ganti semua placeholder di paragraf.
-    run.text hanya mengubah <w:t>, formatting <w:rPr> terjaga otomatis.
-    """
     for key, value in data.items():
-        placeholder = f"{{{{{key}}}}}"
-
-        for run in para.runs:
-            if placeholder in run.text:
-                run.text = run.text.replace(placeholder, str(value))
-
-        if placeholder in "".join(r.text for r in para.runs):
-            _replace_cross_run_placeholder(para, placeholder, str(value))
-
+        _replace_in_para_xml(para, f"{{{{{key}}}}}", str(value))
     return para
 
 
@@ -127,26 +156,17 @@ def replace_placeholders(doc: Document, data: dict) -> Document:
 def apply_find_replace(doc: Document, pairs: list[tuple[str, str]]) -> int:
     """
     Ganti kata secara langsung di seluruh dokumen (body, tabel, header, footer).
-    Memanfaatkan logika yang sama dengan replace_placeholders sehingga
-    formatting run tetap terjaga.
+    Menggunakan _replace_in_para_xml yang sama dengan placeholder replacement
+    sehingga hyperlink, tracked-change, dan split antar <w:t> ikut tertangani.
     Kembalikan jumlah total penggantian yang dilakukan.
     """
     total = 0
-    substitutions = {f: t for f, t in pairs if f.strip()}
+    substitutions = [(f, r) for f, r in pairs if f.strip()]
 
     def _replace_in_para(para):
         nonlocal total
-        for find, replace in substitutions.items():
-            for run in para.runs:
-                if find in run.text:
-                    count = run.text.count(find)
-                    run.text = run.text.replace(find, replace)
-                    total += count
-            # Tangani kata yang terpecah antar run
-            if find in "".join(r.text for r in para.runs):
-                before_count = "".join(r.text for r in para.runs).count(find)
-                _replace_cross_run_placeholder(para, find, replace)
-                total += before_count
+        for find, replace in substitutions:
+            total += _replace_in_para_xml(para, find, replace)
 
     def _replace_in_tables(tables):
         for table in tables:
