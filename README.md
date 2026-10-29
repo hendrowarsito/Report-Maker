@@ -15,7 +15,8 @@ Aplikasi terbuka di `http://localhost:8501` dengan dua halaman (menu di atas).
 
 ## Laporan otomatis (halaman utama) — tanpa placeholder
 
-1. **Upload** template laporan (.docx), lembar kerja penilaian (.xlsx), dan
+1. **Upload** template laporan (.docx — boleh banyak file: bab-bab laporan,
+   surat pengantar, ringkasan, dll.), lembar kerja penilaian (.xlsx), dan
    dokumen pendukung — sertifikat tanah, IMB/PBG, proposal (.pdf / .docx).
 2. Klik **Analisis dokumen**. Claude membaca template dan menemukan sendiri
    data objek yang harus diisi/diganti (pemberi tugas, alamat, sertifikat,
@@ -29,8 +30,11 @@ Aplikasi terbuka di `http://localhost:8501` dengan dua halaman (menu di atas).
 5. Periksa tabel temuan. Kolom **Gunakan** berisi sumber yang disarankan —
    ganti bila perlu, pilih *Isi manual*, atau *Jangan ubah*. Rincian setiap
    penggantian (paragraf, teks lama → teks baru) bisa dilihat sebelum unduh.
-6. **Unduh** laporan (.docx, dan PDF bila LibreOffice tersedia). Placeholder
-   yang tersisa dan nominal yang tidak sesuai terbilang diperingatkan.
+   Kolom *Muncul di* menunjukkan file mana saja yang memuat data itu — satu
+   pilihan diterapkan seragam di semua bab dan surat.
+6. **Unduh** laporan (.docx, dan PDF bila LibreOffice tersedia). Banyak file
+   diunduh sekaligus sebagai .zip, atau satu per satu. Placeholder yang
+   tersisa dan nominal yang tidak sesuai terbilang diperingatkan per file.
 
 Catatan:
 - Nilai dari lembar kerja selalu dibaca dari **sel aslinya**, bukan salinan

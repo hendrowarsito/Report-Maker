@@ -43,6 +43,7 @@ class Kemunculan:
     paragraf: int
     teks_lama: str
     bentuk: str      # salah satu BENTUK
+    dokumen: str = ""  # nama file template (laporan bisa terdiri dari banyak bab/surat)
 
 
 @dataclass
@@ -119,11 +120,12 @@ _SKEMA = {
                         "items": {
                             "type": "object",
                             "properties": {
+                                "dokumen": {"type": "string"},
                                 "paragraf": {"type": "integer"},
                                 "teks_lama": {"type": "string"},
                                 "bentuk": {"type": "string", "enum": BENTUK},
                             },
-                            "required": ["paragraf", "teks_lama", "bentuk"],
+                            "required": ["dokumen", "paragraf", "teks_lama", "bentuk"],
                             "additionalProperties": False,
                         },
                     },
@@ -144,8 +146,10 @@ _SYSTEM = """\
 Anda membantu penilai di Kantor Jasa Penilai Publik (KJPP) menyusun laporan \
 penilaian properti. Anda menerima dokumen sumber — lembar kerja penilaian \
 (Excel, per sel "Sheet!C5"), sertifikat tanah, IMB/PBG, proposal/surat \
-penugasan, dsb. — dan template laporan yang paragrafnya bernomor [n]. Template \
-bisa berisi placeholder {{...}} atau data objek dari laporan lama.
+penugasan, dsb. — dan satu atau beberapa file template (bab-bab laporan, \
+surat pengantar, ringkasan, dsb.) yang paragrafnya bernomor [n] per file. \
+Template bisa berisi placeholder {{...}} atau data objek dari laporan lama. \
+Satu data bisa muncul di beberapa file; semuanya harus diisi sama.
 
 Tugas:
 1. Temukan setiap DATA OBJEK di template yang harus berasal dari dokumen sumber: \
@@ -166,8 +170,9 @@ ada kandidat.
 4. "konsisten" = apakah semua kandidat menyatakan fakta yang sama (abaikan \
 beda format/singkatan, mis. "Jl." vs "Jalan"). Bila tidak, jelaskan bedanya \
 singkat di "penjelasan".
-5. "kemunculan" = setiap tempat data itu muncul di template: "paragraf" = \
-nomor [n]; "teks_lama" = teks persis dari paragraf yang harus diganti \
+5. "kemunculan" = setiap tempat data itu muncul di SEMUA file template: \
+"dokumen" = nama file template persis; "paragraf" = nomor [n] di file itu; \
+"teks_lama" = teks persis dari paragraf yang harus diganti \
 (placeholder lengkap dengan kurungnya, atau nilai lama — sependek mungkin, \
 tanpa kata di sekitarnya, tidak saling tumpang tindih); "bentuk" = "teks" \
 (diganti nilai apa adanya — juga untuk nomor/kode seperti nomor \
@@ -182,12 +187,15 @@ Semua teks penjelasan dalam bahasa Indonesia, singkat.\
 
 def analisis_dokumen(
     client: anthropic.Anthropic,
-    paragraf: dict[int, str],
+    template: dict[str, dict[int, str]],
     sumber: list[tuple[str, bytes]],
 ) -> tuple[list[Temuan], str]:
     """
-    Kirim template + sumber ke Claude. Nilai kandidat dari lembar kerja
-    diganti dengan isi sel aslinya bila lokasinya menunjuk satu sel.
+    Kirim semua template + sumber ke Claude dalam satu permintaan, agar data
+    yang sama diisi seragam di semua bab dan surat.
+    template: {nama file: {nomor paragraf: teks}}.
+    Nilai kandidat dari lembar kerja diganti dengan isi sel aslinya bila
+    lokasinya menunjuk satu sel.
     """
     konten: list[dict] = []
     sel_per_file: dict[str, dict[str, str]] = {}
@@ -199,8 +207,9 @@ def analisis_dokumen(
     # Sumber jarang berubah antar-percobaan: cache agar analisis ulang lebih murah
     konten[-1]["cache_control"] = {"type": "ephemeral"}
 
-    laporan = "\n".join(f"[{i}] {teks}" for i, teks in paragraf.items())
-    konten.append({"type": "text", "text": f"# Template laporan (paragraf bernomor)\n\n{laporan}"})
+    for nama, paragraf in template.items():
+        isi = "\n".join(f"[{i}] {teks}" for i, teks in paragraf.items())
+        konten.append({"type": "text", "text": f"# Template: {nama} (paragraf bernomor)\n\n{isi}"})
 
     data = minta_json(client, _SYSTEM, konten, _SKEMA)
 
@@ -254,19 +263,24 @@ def teks_pengganti(kemunculan: Kemunculan, nilai: str) -> str | None:
 
 def rencana_perubahan(
     temuan: list[Temuan], nilai_dipakai: dict[int, str]
-) -> tuple[list[Usulan], list[str]]:
+) -> tuple[dict[str, list[Usulan]], list[str]]:
     """
     nilai_dipakai: {indeks temuan: nilai} — temuan yang tidak ada di sini
-    tidak diubah. Kembalikan (perubahan, peringatan).
+    tidak diubah. Kembalikan ({nama template: perubahan}, peringatan).
     """
-    perubahan: list[Usulan] = []
+    perubahan: dict[str, list[Usulan]] = {}
     peringatan: list[str] = []
     for i, nilai in nilai_dipakai.items():
         t = temuan[i]
         for m in t.kemunculan:
             baru = teks_pengganti(m, nilai)
             if baru is None:
-                peringatan.append(f"{t.nama}: “{nilai}” bukan angka, {m.bentuk} di paragraf [{m.paragraf}] dilewati")
+                peringatan.append(
+                    f"{t.nama}: “{nilai}” bukan angka, {m.bentuk} di {m.dokumen} "
+                    f"paragraf [{m.paragraf}] dilewati"
+                )
             elif baru != m.teks_lama:
-                perubahan.append(Usulan(m.paragraf, m.teks_lama, baru, t.nama, "", ""))
+                perubahan.setdefault(m.dokumen, []).append(
+                    Usulan(m.paragraf, m.teks_lama, baru, t.nama, "", "")
+                )
     return perubahan, peringatan

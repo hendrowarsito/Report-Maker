@@ -1,7 +1,8 @@
 """
 Laporan otomatis — tanpa placeholder.
 
-1. Upload template, lembar kerja, dan dokumen pendukung (sertifikat, IMB, proposal)
+1. Upload template (boleh banyak file: bab-bab laporan & surat), lembar kerja,
+   dan dokumen pendukung (sertifikat, IMB, proposal)
 2-4. Claude membaca template, menemukan data objek yang harus diisi, mengambil
      nilainya dari tiap sumber, dan mengecek konsistensi antarsumber
 5. Penilai memeriksa tabel temuan dan memilih sumber yang dipakai
@@ -9,6 +10,9 @@ Laporan otomatis — tanpa placeholder.
 """
 import hashlib
 import os
+import zipfile
+from collections import Counter
+from io import BytesIO
 from pathlib import Path
 
 import anthropic
@@ -70,7 +74,9 @@ def _cocokkan_sumber(nama: str, daftar: list[str]) -> str:
 # ---------------------------------------------------------------------------
 st.subheader("① Upload dokumen")
 c1, c2 = st.columns(2)
-template = c1.file_uploader("Template laporan (.docx)", type=["docx"])
+templates = c1.file_uploader(
+    "Template laporan — bab-bab & surat (.docx)", type=["docx"], accept_multiple_files=True
+)
 lembar_kerja = c2.file_uploader("Lembar kerja penilaian (.xlsx)", type=["xlsx"])
 pendukung = st.file_uploader(
     "Dokumen pendukung — sertifikat tanah, IMB/PBG, proposal, dll. (.pdf / .docx)",
@@ -85,15 +91,20 @@ with st.expander("Pengaturan"):
         st.warning("Format API key tidak valid.")
 
 sumber_files = ([lembar_kerja] if lembar_kerja else []) + list(pendukung or [])
-if not (template and sumber_files):
+if not (templates and sumber_files):
     st.info("Upload template laporan dan minimal satu sumber data (lembar kerja atau dokumen pendukung).")
     st.stop()
 
-template_bytes = template.getvalue()
+nama_template = [f.name for f in templates]
+if len(set(nama_template)) < len(nama_template):
+    st.error("Ada file template dengan nama sama. Ubah namanya agar bisa dibedakan.")
+    st.stop()
+
+template_bytes = {f.name: f.getvalue() for f in templates}
+paragraf_per_file = {nama: _paragraf(isi) for nama, isi in template_bytes.items()}
 sumber = [(f.name, f.getvalue()) for f in sumber_files]
 nama_sumber = [n for n, _ in sumber]
 ukuran_pdf_mb = sum(len(b) for n, b in sumber if n.lower().endswith(".pdf")) / 1_000_000
-paragraf = _paragraf(template_bytes)
 
 # ---------------------------------------------------------------------------
 # ② Analisis
@@ -101,13 +112,15 @@ paragraf = _paragraf(template_bytes)
 st.divider()
 st.subheader("② Analisis")
 st.caption(
-    f"Template: {len(paragraf)} paragraf · Sumber: {', '.join(nama_sumber)}. "
+    f"Template: {len(template_bytes)} file, "
+    f"{sum(len(p) for p in paragraf_per_file.values())} paragraf · "
+    f"Sumber: {', '.join(nama_sumber)}. "
     "Claude mencari data objek di template (alamat, sertifikat, luas, IMB, nilai, dll.), "
     "mengambil nilainya dari setiap sumber, dan mengecek apakah sumber-sumber itu sama."
 )
 
 kunci = hashlib.md5(
-    template_bytes + b"".join(n.encode() + b for n, b in sumber)
+    b"".join(n.encode() + b for n, b in [*template_bytes.items(), *sumber])
 ).hexdigest()
 kunci_analisis = f"analisis_{kunci}"
 
@@ -126,15 +139,20 @@ if st.button(
     type="primary",
 ):
     try:
-        with st.spinner("Claude sedang membaca template dan dokumen sumber… (bisa 1–3 menit)"):
-            temuan, catatan = analisis_dokumen(get_client(api_key), paragraf, sumber)
+        with st.spinner("Claude sedang membaca template dan dokumen sumber… (bisa 1–5 menit)"):
+            temuan, catatan = analisis_dokumen(get_client(api_key), paragraf_per_file, sumber)
     except (anthropic.APIError, RuntimeError, ValueError) as e:
         st.error(f"Analisis gagal: {e}")
     else:
-        # Buang kemunculan yang teksnya tidak benar-benar ada di paragraf
+        # Buang kemunculan yang file/teksnya tidak benar-benar ada di template
         dibuang = 0
         for t in temuan:
-            sah = [m for m in t.kemunculan if m.teks_lama and m.teks_lama in paragraf.get(m.paragraf, "")]
+            sah = []
+            for m in t.kemunculan:
+                m.dokumen = _cocokkan_sumber(m.dokumen, nama_template)
+                teks_paragraf = paragraf_per_file.get(m.dokumen, {}).get(m.paragraf, "")
+                if m.teks_lama and m.teks_lama in teks_paragraf:
+                    sah.append(m)
             dibuang += len(t.kemunculan) - len(sah)
             t.kemunculan = sah
         st.session_state[kunci_analisis] = (temuan, catatan, dibuang)
@@ -204,6 +222,9 @@ for i in urutan:
         "Gunakan": _pilihan_awal(t),
         "Nilai manual": "",
         "Di laporan saat ini": " · ".join(dict.fromkeys(m.teks_lama for m in t.kemunculan)) or "—",
+        "Muncul di": ", ".join(
+            f"{Path(d).stem} ({n}×)" for d, n in Counter(m.dokumen for m in t.kemunculan).items()
+        ) or "—",
         "Keterangan": t.penjelasan,
     })
 
@@ -245,8 +266,12 @@ for i, (_, r) in zip(urutan, df.iterrows()):
     else:
         nilai_dipakai[i] = nilai
 
-perubahan, peringatan_angka = rencana_perubahan(temuan, nilai_dipakai)
-perubahan, _ = validasi_usulan(paragraf, perubahan)
+perubahan_per_file, peringatan_angka = rencana_perubahan(temuan, nilai_dipakai)
+perubahan_per_file = {
+    nama: validasi_usulan(paragraf_per_file[nama], usulan)[0]
+    for nama, usulan in perubahan_per_file.items()
+}
+jumlah_perubahan = sum(len(u) for u in perubahan_per_file.values())
 peringatan += peringatan_angka
 
 if jumlah_kosong:
@@ -254,14 +279,18 @@ if jumlah_kosong:
 for p in peringatan:
     st.warning(p)
 
-with st.expander(f"Rincian {len(perubahan)} perubahan yang akan ditulis ke laporan"):
-    if perubahan:
+with st.expander(f"Rincian {jumlah_perubahan} perubahan yang akan ditulis ke laporan"):
+    if jumlah_perubahan:
+        rincian = [
+            (nama, u) for nama in nama_template for u in perubahan_per_file.get(nama, [])
+        ]
         st.dataframe(
             pd.DataFrame({
-                "Paragraf": [u.paragraf for u in perubahan],
-                "Data": [u.alasan for u in perubahan],
-                "Teks lama": [u.teks_lama for u in perubahan],
-                "Teks baru": [u.teks_baru for u in perubahan],
+                "Dokumen": [nama for nama, _ in rincian],
+                "Paragraf": [u.paragraf for _, u in rincian],
+                "Data": [u.alasan for _, u in rincian],
+                "Teks lama": [u.teks_lama for _, u in rincian],
+                "Teks baru": [u.teks_baru for _, u in rincian],
             }),
             hide_index=True,
             width="stretch",
@@ -275,40 +304,68 @@ with st.expander(f"Rincian {len(perubahan)} perubahan yang akan ditulis ke lapor
 st.divider()
 st.subheader("④ Unduh laporan")
 
-hasil, jumlah = terapkan_penyesuaian(template_bytes, perubahan)
-_, teks_hasil, sisa_placeholder = isi_dokumen(hasil, {}, ())
-nominal = check_value_consistency_table(teks_hasil)
-salah_nominal = nominal[nominal["Status"].str.startswith("❌")]
+hasil: dict[str, bytes] = {}
+masalah: list[str] = []
+jumlah = 0
+for nama in nama_template:
+    isi, n = terapkan_penyesuaian(template_bytes[nama], perubahan_per_file.get(nama, []))
+    hasil[nama] = isi
+    jumlah += n
+    _, teks_hasil, sisa_placeholder = isi_dokumen(isi, {}, ())
+    nominal = check_value_consistency_table(teks_hasil)
+    salah_nominal = nominal[nominal["Status"].str.startswith("❌")]
+    if sisa_placeholder:
+        masalah.append(
+            f"**{nama}** — {len(sisa_placeholder)} placeholder tersisa: "
+            + ", ".join(f"`{{{{{p}}}}}`" for p in sisa_placeholder)
+        )
+    for _, r in salah_nominal.iterrows():
+        masalah.append(f"**{nama}** — {r['Angka (Rp)']} ({r['Terbilang di Dokumen']}): {r['Status']}")
 
-if sisa_placeholder:
-    st.warning(
-        f"{len(sisa_placeholder)} placeholder masih tersisa: "
-        + ", ".join(f"`{{{{{p}}}}}`" for p in sisa_placeholder)
+if masalah:
+    st.warning("Periksa sebelum dikirim:\n" + "\n".join(f"- {m}" for m in masalah))
+else:
+    st.success(f"Laporan siap — {jumlah} penggantian di {len(hasil)} file.")
+
+nama_hasil = {nama: f"{Path(nama).stem}_terisi" for nama in nama_template}
+buat_pdf = pdf_tersedia() and st.toggle("Sertakan PDF")
+pdfs: dict[str, bytes] = {}
+if buat_pdf:
+    try:
+        with st.spinner("Membuat PDF..."):
+            pdfs = {nama: _pdf(isi) for nama, isi in hasil.items()}
+    except RuntimeError as e:
+        st.error(str(e))
+
+if len(hasil) == 1:
+    nama, isi = next(iter(hasil.items()))
+    c1, c2, _ = st.columns([1, 1, 3])
+    c1.download_button(
+        "Unduh Word (.docx)", data=isi, file_name=f"{nama_hasil[nama]}.docx",
+        mime=MIME_DOCX, type="primary", width="stretch",
     )
-if not salah_nominal.empty:
-    st.warning("Ada nominal yang tidak sesuai terbilangnya:")
-    st.dataframe(salah_nominal, hide_index=True, width="stretch")
-if not sisa_placeholder and salah_nominal.empty:
-    st.success(f"Laporan siap — {jumlah} penggantian diterapkan.")
-
-nama_hasil = f"{Path(template.name).stem}_terisi"
-c1, c2, _ = st.columns([1, 1, 3])
-c1.download_button(
-    "Unduh Word (.docx)",
-    data=hasil,
-    file_name=f"{nama_hasil}.docx",
-    mime=MIME_DOCX,
-    type="primary",
-    width="stretch",
-)
-if pdf_tersedia():
-    if c2.toggle("Buat PDF"):
-        try:
-            with st.spinner("Membuat PDF..."):
-                pdf = _pdf(hasil)
-            c2.download_button(
-                "Unduh PDF", data=pdf, file_name=f"{nama_hasil}.pdf",
-                mime="application/pdf", width="stretch",
+    if nama in pdfs:
+        c2.download_button(
+            "Unduh PDF", data=pdfs[nama], file_name=f"{nama_hasil[nama]}.pdf",
+            mime="application/pdf", width="stretch",
+        )
+else:
+    zip_buffer = BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
+        for nama, isi in hasil.items():
+            zipf.writestr(f"{nama_hasil[nama]}.docx", isi)
+            if nama in pdfs:
+                zipf.writestr(f"{nama_hasil[nama]}.pdf", pdfs[nama])
+    st.download_button(
+        f"Unduh semua ({len(hasil)} file, .zip)",
+        data=zip_buffer.getvalue(),
+        file_name="Laporan_terisi.zip",
+        mime="application/zip",
+        type="primary",
+    )
+    with st.expander("Unduh per file"):
+        for nama, isi in hasil.items():
+            st.download_button(
+                f"{nama_hasil[nama]}.docx", data=isi, file_name=f"{nama_hasil[nama]}.docx",
+                mime=MIME_DOCX, key=f"unduh_{nama}",
             )
-        except RuntimeError as e:
-            st.error(str(e))

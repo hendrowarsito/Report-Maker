@@ -40,25 +40,34 @@ def test_teks_pengganti(bentuk, teks_lama, nilai, hasil):
 def test_rencana_perubahan_lewati_yang_sama_dan_bukan_angka():
     temuan = [
         Temuan("Nilai pasar", kemunculan=[
-            Kemunculan(3, "1.000.000.000,00", "angka"),
-            Kemunculan(3, "SATU MILIAR RUPIAH", "terbilang"),
+            Kemunculan(3, "1.000.000.000,00", "angka", "Bab 1.docx"),
+            Kemunculan(3, "SATU MILIAR RUPIAH", "terbilang", "Bab 1.docx"),
+            Kemunculan(0, "1.000.000.000,00", "angka", "Surat.docx"),
         ]),
-        Temuan("Luas tanah", kemunculan=[Kemunculan(1, "312", "angka")]),
-        Temuan("Alamat", kemunculan=[Kemunculan(0, "{{alamat}}", "teks")]),
+        Temuan("Luas tanah", kemunculan=[Kemunculan(1, "312", "angka", "Bab 1.docx")]),
+        Temuan("Alamat", kemunculan=[Kemunculan(0, "{{alamat}}", "teks", "Surat.docx")]),
     ]
     perubahan, peringatan = rencana_perubahan(
         temuan, {0: "1.250.000.000", 1: "312", 2: "Jl. X"}
     )
-    assert perubahan == [
-        Usulan(3, "1.000.000.000,00", "1.250.000.000,00", "Nilai pasar", "", ""),
-        Usulan(3, "SATU MILIAR RUPIAH", "SATU MILIAR DUA RATUS LIMA PULUH JUTA RUPIAH",
-               "Nilai pasar", "", ""),
-        Usulan(0, "{{alamat}}", "Jl. X", "Alamat", "", ""),
-    ]   # luas 312 sudah sama → tidak diubah
+    # Satu pilihan nilai diterapkan seragam di semua file; luas 312 sudah sama
+    assert perubahan == {
+        "Bab 1.docx": [
+            Usulan(3, "1.000.000.000,00", "1.250.000.000,00", "Nilai pasar", "", ""),
+            Usulan(3, "SATU MILIAR RUPIAH", "SATU MILIAR DUA RATUS LIMA PULUH JUTA RUPIAH",
+                   "Nilai pasar", "", ""),
+        ],
+        "Surat.docx": [
+            Usulan(0, "1.000.000.000,00", "1.250.000.000,00", "Nilai pasar", "", ""),
+            Usulan(0, "{{alamat}}", "Jl. X", "Alamat", "", ""),
+        ],
+    }
     assert peringatan == []
 
     _, peringatan = rencana_perubahan(temuan, {1: "tiga ratus"})
-    assert peringatan == ["Luas tanah: “tiga ratus” bukan angka, angka di paragraf [1] dilewati"]
+    assert peringatan == [
+        "Luas tanah: “tiga ratus” bukan angka, angka di Bab 1.docx paragraf [1] dilewati"
+    ]
 
 
 def _xlsx() -> bytes:
@@ -104,7 +113,8 @@ def test_analisis_dokumen_nilai_lembar_kerja_dari_sel_asli():
             "rekomendasi": "SHM.pdf",
             "konsisten": True,
             "penjelasan": "",
-            "kemunculan": [{"paragraf": 0, "teks_lama": "250", "bentuk": "angka"}],
+            "kemunculan": [{"dokumen": "Bab 2.docx", "paragraf": 0, "teks_lama": "250",
+                            "bentuk": "angka"}],
         }],
         "catatan": "",
     }
@@ -125,14 +135,17 @@ def test_analisis_dokumen_nilai_lembar_kerja_dari_sel_asli():
 
     client = SimpleNamespace(beta=SimpleNamespace(messages=SimpleNamespace(stream=stream)))
     temuan, _ = analisis_dokumen(
-        client, {0: "luas 250 m²"}, [("LK.xlsx", _xlsx()), ("SHM.pdf", b"%PDF-1.4")]
+        client,
+        {"Surat.docx": {0: "Dengan hormat,"}, "Bab 2.docx": {0: "luas 250 m²"}},
+        [("LK.xlsx", _xlsx()), ("SHM.pdf", b"%PDF-1.4")],
     )
     assert temuan[0].kandidat == [
         Kandidat("LK.xlsx", "LK Tanah!C2", "312"),
         Kandidat("SHM.pdf", "hal. 1", "312"),
     ]
-    assert temuan[0].kemunculan == [Kemunculan(0, "250", "angka")]
+    assert temuan[0].kemunculan == [Kemunculan(0, "250", "angka", "Bab 2.docx")]
 
-    lk, shm, template = tercatat["messages"][0]["content"]
+    lk, shm, surat, bab2 = tercatat["messages"][0]["content"]
     assert shm["type"] == "document" and shm["cache_control"] == {"type": "ephemeral"}
-    assert "[0] luas 250 m²" in template["text"]
+    assert surat["text"] == "# Template: Surat.docx (paragraf bernomor)\n\n[0] Dengan hormat,"
+    assert bab2["text"].startswith("# Template: Bab 2.docx") and "[0] luas 250 m²" in bab2["text"]
