@@ -1,7 +1,7 @@
-import json
+import datetime
+import numbers
 import re
 from io import BytesIO
-from itertools import zip_longest
 import zipfile
 
 import anthropic
@@ -71,7 +71,7 @@ def angka_ke_terbilang(n: int) -> str:
     """
     Ubah bilangan bulat ke terbilang HURUF KAPITAL SEMUA.
     Contoh: 200_000_000 → 'DUA RATUS JUTA RUPIAH'
-    Gunakan placeholder {{KEY_TERBILANG}} atau nama kustom dari kolom ke-3 Excel.
+    Dipakai untuk placeholder {{KEY_TERBILANG}}.
     """
     if n == 0:
         return "NOL RUPIAH"
@@ -83,7 +83,7 @@ def angka_ke_terbilang_title(n: int) -> str:
     """
     Ubah bilangan bulat ke terbilang Huruf Besar Di Awal Kata (Title Case).
     Contoh: 200_000_000 → 'Dua Ratus Juta Rupiah'
-    Gunakan placeholder {{KEY_TERBILANG_TITLE}} atau nama kustom dari kolom ke-4 Excel.
+    Dipakai untuk placeholder {{KEY_TERBILANG_TITLE}}.
     """
     return angka_ke_terbilang(n).title()
 
@@ -146,63 +146,100 @@ def format_angka_indonesia(n: int) -> str:
     return f"{n:,}".replace(",", ".") + ",00"
 
 
+_BULAN = [
+    "Januari", "Februari", "Maret", "April", "Mei", "Juni",
+    "Juli", "Agustus", "September", "Oktober", "November", "Desember",
+]
+
+
+def format_tanggal(d: datetime.date) -> str:
+    """Contoh: date(2026, 4, 28) → '28 April 2026'"""
+    return f"{d.day} {_BULAN[d.month - 1]} {d.year}"
+
+
+def format_nilai(value) -> str:
+    """
+    Ubah nilai sel Excel ke teks siap tempel di laporan.
+      • kosong / NaN          → ''
+      • 200000000.0           → '200000000'   (tanpa '.0')
+      • 0.25                  → '0,25'        (desimal koma)
+      • datetime(2026, 4, 28) → '28 April 2026'
+      • teks                  → apa adanya (spasi di tepi dibuang)
+    """
+    if value is None or (not isinstance(value, str) and pd.isna(value)):
+        return ""
+    if isinstance(value, bool):
+        return str(value)
+    if isinstance(value, datetime.datetime):        # termasuk pd.Timestamp
+        teks = format_tanggal(value)
+        if (value.hour, value.minute) != (0, 0):
+            teks += f" {value:%H:%M}"
+        return teks
+    if isinstance(value, datetime.date):
+        return format_tanggal(value)
+    if isinstance(value, datetime.time):
+        return f"{value:%H:%M}"
+    if isinstance(value, numbers.Integral):
+        return str(int(value))
+    if isinstance(value, numbers.Real):
+        if float(value).is_integer():
+            return str(int(value))
+        return f"{value:.6f}".rstrip("0").rstrip(".").replace(".", ",")
+    return str(value).strip()
+
+
+# Placeholder turunan dibuat otomatis dari key Excel berdasarkan akhiran namanya.
+# Urutan penting: _TERBILANG_TITLE harus dicek sebelum _TERBILANG.
+_SUFIKS_TURUNAN = {
+    "_TERBILANG_TITLE": angka_ke_terbilang_title,
+    "_TERBILANG":       angka_ke_terbilang,
+    "_FORMAT":          format_rupiah,
+}
+
+
+def _pecah_turunan(ph: str):
+    """'NP_nominal_TERBILANG' → ('NP_nominal', angka_ke_terbilang); bukan turunan → (None, None)."""
+    for sufiks, fungsi in _SUFIKS_TURUNAN.items():
+        if ph.upper().endswith(sufiks) and len(ph) > len(sufiks):
+            return ph[: -len(sufiks)], fungsi
+    return None, None
+
+
 def generate_auto_terbilang(
-    data_dict: dict,
-    terbilang_map: dict[str, str] | None = None,
-    title_map: dict[str, str] | None = None,
-) -> dict[str, dict]:
+    data_dict: dict[str, str], placeholders: set[str]
+) -> tuple[dict[str, str], dict[str, str]]:
     """
-    Buat terbilang HANYA untuk key yang eksplisit ditandai di kolom ke-3
-    atau ke-4 Excel. Key yang tidak ada di kedua map tidak diproses sama sekali
-    — sehingga angka seperti luas_tanah, kurs, dsb. tidak ikut diubah.
+    Buat nilai untuk placeholder turunan yang dipakai di template, berdasarkan
+    konvensi nama (akhiran tidak peka huruf besar/kecil):
 
-    terbilang_map  — kolom ke-3: nama placeholder ALL CAPS
-                     Contoh: {"NP_nominal": "NP_kalimat_cap"}
-    title_map      — kolom ke-4: nama placeholder Title Case
-                     Contoh: {"NP_nominal": "NP_kalimat"}
+      {{NP_nominal_TERBILANG}}        → "DUA RATUS JUTA RUPIAH"
+      {{NP_nominal_TERBILANG_TITLE}}  → "Dua Ratus Juta Rupiah"
+      {{NP_nominal_FORMAT}}           → "Rp 200.000.000,00"
 
-    Untuk setiap key yang ditandai dihasilkan:
-      • source key          → diformat Indonesia: "200.000.000,00"
-      • KEY_FORMAT          → "Rp 200.000.000,00"
-      • placeholder col-3   → "DUA RATUS JUTA RUPIAH"
-      • placeholder col-4   → "Dua Ratus Juta Rupiah"
+    Key sumber yang punya turunan ikut diformat Indonesia: "200.000.000,00".
+    Placeholder yang sudah punya nilai di Excel tidak ditimpa.
+
+    Kembalikan (nilai_tambahan, peringatan) — peringatan berisi placeholder
+    turunan yang tidak bisa dibuat beserta alasannya.
     """
-    terbilang_map = terbilang_map or {}
-    title_map     = title_map     or {}
-    tambahan: dict[str, dict] = {}
+    tambahan:   dict[str, str] = {}
+    peringatan: dict[str, str] = {}
 
-    # Hanya proses key yang ada di salah satu map (opt-in)
-    keys_ditandai = set(terbilang_map) | set(title_map)
-    if not keys_ditandai:
-        return tambahan
-
-    for key in keys_ditandai:
-        val = data_dict.get(key)
-        if val is None:
+    for ph in sorted(placeholders):
+        if ph in data_dict:
             continue
-
-        angka = _parse_ke_int(val)
+        sumber, fungsi = _pecah_turunan(ph)
+        if sumber is None or sumber not in data_dict:
+            continue
+        angka = _parse_ke_int(data_dict[sumber])
         if angka is None:
+            peringatan[ph] = f"Nilai {{{{{sumber}}}}} bukan angka"
             continue
 
-        info = {
-            "sumber":          key,
-            "angka":           angka,
-            "terbilang":       angka_ke_terbilang(angka),
-            "terbilang_title": angka_ke_terbilang_title(angka),
-            "format_rp":       format_rupiah(angka),
-            "format_angka":    format_angka_indonesia(angka),
-        }
+        tambahan[ph]     = fungsi(angka)
+        tambahan[sumber] = format_angka_indonesia(angka)
 
-        fmt_key      = key + "_FORMAT"
-        tb_key       = terbilang_map.get(key, key + "_TERBILANG")
-        tb_title_key = title_map.get(key,     key + "_TERBILANG_TITLE")
-
-        if fmt_key      not in data_dict: tambahan[fmt_key]      = info
-        if tb_key       not in data_dict: tambahan[tb_key]       = info
-        if tb_title_key not in data_dict: tambahan[tb_title_key] = info
-
-    return tambahan
+    return tambahan, peringatan
 
 
 # =============================================================================
@@ -311,22 +348,18 @@ def replace_placeholders_in_paragraph(para, data: dict):
 # Document-level replacement (body + tabel tersarang + header + footer)
 # =============================================================================
 
-def _process_paragraph_collection(paragraphs, data: dict):
-    for para in paragraphs:
-        replace_placeholders_in_paragraph(para, data)
-
-
-def _process_table_collection(tables, data: dict):
+def _iter_table_paragraphs(tables):
     for table in tables:
         for row in table.rows:
             for cell in row.cells:
-                _process_paragraph_collection(cell.paragraphs, data)
-                _process_table_collection(cell.tables, data)
+                yield from cell.paragraphs
+                yield from _iter_table_paragraphs(cell.tables)
 
 
-def replace_placeholders(doc: Document, data: dict) -> Document:
-    _process_paragraph_collection(doc.paragraphs, data)
-    _process_table_collection(doc.tables, data)
+def iter_all_paragraphs(doc: Document):
+    """Semua paragraf dokumen: body, tabel tersarang, header, dan footer."""
+    yield from doc.paragraphs
+    yield from _iter_table_paragraphs(doc.tables)
 
     for section in doc.sections:
         for hf in (
@@ -335,10 +368,26 @@ def replace_placeholders(doc: Document, data: dict) -> Document:
             section.first_page_header, section.first_page_footer,
         ):
             if hf is not None:
-                _process_paragraph_collection(hf.paragraphs, data)
-                _process_table_collection(hf.tables, data)
+                yield from hf.paragraphs
+                yield from _iter_table_paragraphs(hf.tables)
 
+
+def replace_placeholders(doc: Document, data: dict) -> Document:
+    for para in iter_all_paragraphs(doc):
+        replace_placeholders_in_paragraph(para, data)
     return doc
+
+
+_POLA_PLACEHOLDER = re.compile(r"\{\{([^{}]+)\}\}")
+
+
+def collect_placeholders(doc: Document) -> set[str]:
+    """Nama semua placeholder {{...}} di dokumen, termasuk header/footer."""
+    nama: set[str] = set()
+    for para in iter_all_paragraphs(doc):
+        teks = "".join(t.text or "" for t in para._element.iter(_W_T))
+        nama.update(_POLA_PLACEHOLDER.findall(teks))
+    return nama
 
 
 # =============================================================================
@@ -355,33 +404,9 @@ def apply_find_replace(doc: Document, pairs: list[tuple[str, str]]) -> int:
     total = 0
     substitutions = [(f, r) for f, r in pairs if f.strip()]
 
-    def _replace_in_para(para):
-        nonlocal total
+    for para in iter_all_paragraphs(doc):
         for find, replace in substitutions:
             total += _replace_in_para_xml(para, find, replace)
-
-    def _replace_in_tables(tables):
-        for table in tables:
-            for row in table.rows:
-                for cell in row.cells:
-                    for para in cell.paragraphs:
-                        _replace_in_para(para)
-                    _replace_in_tables(cell.tables)
-
-    for para in doc.paragraphs:
-        _replace_in_para(para)
-    _replace_in_tables(doc.tables)
-
-    for section in doc.sections:
-        for hf in (
-            section.header, section.footer,
-            section.even_page_header, section.even_page_footer,
-            section.first_page_header, section.first_page_footer,
-        ):
-            if hf is not None:
-                for para in hf.paragraphs:
-                    _replace_in_para(para)
-                _replace_in_tables(hf.tables)
 
     return total
 
@@ -422,6 +447,7 @@ def smart_replace_with_claude(
 # =============================================================================
 
 def process_files(word_file, data_dict: dict, find_replace_pairs: list[tuple[str, str]] | None = None):
+    word_file.seek(0)
     doc = Document(word_file)
     updated_doc = replace_placeholders(doc, data_dict)
     if find_replace_pairs:
@@ -466,57 +492,70 @@ def highlight_placeholders(text: str) -> str:
     return re.sub(r"(\{\{.*?\}\})", r"[PLACEHOLDER:\1]", text)
 
 
-def scan_remaining_placeholders(text: str) -> list[str]:
-    """Kembalikan daftar placeholder {{...}} yang belum terganti."""
-    return sorted(set(re.findall(r"\{\{[^}]+\}\}", text)))
-
-
 # =============================================================================
-# Konsistensi nominal angka vs terbilang (regex — tidak butuh API)
+# Kecocokan placeholder template vs data Excel (tanpa API)
 # =============================================================================
 
-def check_value_consistency_table(text: str) -> tuple[pd.DataFrame, list[int], list[str]]:
+def build_placeholder_check(
+    placeholders: dict[str, list[str]],
+    data_excel: dict[str, str],
+    data_final: dict[str, str],
+    peringatan: dict[str, str],
+) -> pd.DataFrame:
     """
-    Kembalikan (dataframe, list angka, list kata) untuk keperluan validasi AI.
-
-    Catatan bug yang diperbaiki vs versi lama:
-    - Pasangan angka-kata sebelumnya hanya cek keberadaan, bukan kecocokan nilai.
-      Sekarang disimpan terpisah agar bisa divalidasi ke Claude.
+    Satu baris per placeholder di template, dengan nilai yang akan dipakai
+    dan statusnya: dari Excel, dibuat otomatis, kosong, atau tidak ada.
     """
-    number_pattern = r"Rp\s*([\d\.]+,\d{2})\s*\("
-    verbal_block_pattern = r"\(\s*([A-Z\s]+RUPIAH)\s*\)"
-
-    raw_numbers = re.findall(number_pattern, text)
-    number_ints: list[int] = []
-    for n in raw_numbers:
-        cleaned = n.replace(".", "").replace(",", ".")
-        try:
-            number_ints.append(int(float(cleaned)))
-        except ValueError:
-            pass
-
-    verbal_blocks = re.findall(verbal_block_pattern, text.upper())
-    normalized_verbal = [vb.strip() for vb in verbal_blocks]
-
     rows = []
-    for angka, kata in zip_longest(number_ints, normalized_verbal, fillvalue="(tidak ditemukan)"):
-        rows.append(
-            {
-                "Angka (Rp)": (
-                    f"Rp {angka:,}".replace(",", ".")
-                    if isinstance(angka, int)
-                    else angka
-                ),
-                "Penyebutan dalam Kata": kata,
-                "Keterangan (Regex)": (
-                    "⚠️ Tidak cocok"
-                    if angka == "(tidak ditemukan)" or kata == "(tidak ditemukan)"
-                    else "❓ Belum divalidasi AI"
-                ),
-            }
-        )
+    for ph in sorted(placeholders, key=str.lower):
+        if ph in peringatan:
+            status = f"⚠️ {peringatan[ph]}"
+        elif ph not in data_final:
+            status = "❌ Tidak ada di Excel"
+        elif not data_final[ph]:
+            status = "⚠️ Nilai kosong"
+        elif ph in data_excel:
+            status = "✅ Dari Excel"
+        else:
+            status = "✅ Otomatis"
+        rows.append({
+            "Placeholder": f"{{{{{ph}}}}}",
+            "Nilai":       data_final.get(ph, ""),
+            "Status":      status,
+            "Dokumen":     ", ".join(placeholders[ph]),
+        })
+    return pd.DataFrame(rows, columns=["Placeholder", "Nilai", "Status", "Dokumen"])
 
-    return pd.DataFrame(rows), number_ints, normalized_verbal
+
+# =============================================================================
+# Konsistensi nominal angka vs terbilang (dihitung lokal — tidak butuh API)
+# =============================================================================
+
+# "Rp 200.000.000,00 (DUA RATUS JUTA RUPIAH)" — angka dan terbilang ditangkap
+# berpasangan sehingga satu terbilang yang hilang tidak menggeser pasangan lain.
+_POLA_NOMINAL = re.compile(
+    r"Rp\.?\s*(\d[\d.]*(?:,\d{1,2})?)\s*\(([^()]*rupiah[^()]*)\)", re.IGNORECASE
+)
+
+
+def check_value_consistency_table(text: str) -> pd.DataFrame:
+    """
+    Cocokkan setiap nominal "Rp ... (... RUPIAH)" dengan terbilang yang benar
+    menurut angka_ke_terbilang. Tidak peka huruf besar/kecil.
+    """
+    rows = []
+    for angka_teks, kata in _POLA_NOMINAL.findall(text):
+        angka = _parse_ke_int(angka_teks)
+        if angka is None:
+            continue
+        kata_norm = " ".join(kata.upper().split())
+        benar     = angka_ke_terbilang(angka)
+        rows.append({
+            "Angka (Rp)":          format_rupiah(angka),
+            "Terbilang di Dokumen": kata.strip(),
+            "Status": "✅ Sesuai" if kata_norm == benar else f"❌ Seharusnya: {benar}",
+        })
+    return pd.DataFrame(rows, columns=["Angka (Rp)", "Terbilang di Dokumen", "Status"])
 
 
 # =============================================================================
@@ -525,39 +564,6 @@ def check_value_consistency_table(text: str) -> tuple[pd.DataFrame, list[int], l
 
 def _get_client(api_key: str) -> anthropic.Anthropic:
     return anthropic.Anthropic(api_key=api_key)
-
-
-def validate_terbilang_ai(
-    angka: int, terbilang: str, client: anthropic.Anthropic
-) -> dict:
-    """
-    Validasi satu pasang angka-terbilang via Claude Haiku (cepat & hemat).
-    Return: {"valid": bool | None, "koreksi": str | None}
-    """
-    try:
-        response = client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=120,
-            messages=[
-                {
-                    "role": "user",
-                    "content": (
-                        f"Validasi: apakah terbilang ini sesuai angkanya?\n"
-                        f"Angka: Rp {angka:,}\n"
-                        f"Terbilang: {terbilang}\n\n"
-                        "Jawab hanya JSON tanpa markdown:\n"
-                        '{"valid": true, "koreksi": null}\n'
-                        "atau jika salah:\n"
-                        '{"valid": false, "koreksi": "TERBILANG YANG BENAR RUPIAH"}'
-                    ),
-                }
-            ],
-        )
-        text = response.content[0].text.strip()
-        text = re.sub(r"^```json\s*|\s*```$", "", text, flags=re.MULTILINE).strip()
-        return json.loads(text)
-    except Exception as exc:
-        return {"valid": None, "koreksi": None, "error": str(exc)}
 
 
 def review_document_ai(doc_text: str, client: anthropic.Anthropic) -> str:
@@ -587,39 +593,6 @@ def review_document_ai(doc_text: str, client: anthropic.Anthropic) -> str:
         ],
     ) as stream:
         return stream.get_final_text()
-
-
-def analyze_template_ai(template_text: str, client: anthropic.Anthropic) -> dict:
-    """
-    Analisis template Word: deteksi semua placeholder dan artinya.
-    Return dict: {"placeholders": {"KEY": "deskripsi"}, "wajib": [...], "opsional": [...]}
-    """
-    response = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=1500,
-        messages=[
-            {
-                "role": "user",
-                "content": (
-                    "Analisis template laporan penilaian ini. "
-                    "Temukan semua placeholder {{NAMA_PLACEHOLDER}} dan jelaskan:\n"
-                    "- Artinya dalam konteks laporan penilaian properti/aset Indonesia\n"
-                    "- Apakah wajib atau opsional\n"
-                    "- Format data yang diharapkan\n\n"
-                    f"Template:\n---\n{template_text[:8000]}\n---\n\n"
-                    "Jawab hanya JSON tanpa markdown:\n"
-                    '{"placeholders": {"KEY": {"arti": "...", "format": "...", "wajib": true}}, '
-                    '"ringkasan": "..."}'
-                ),
-            }
-        ],
-    )
-    text = response.content[0].text.strip()
-    text = re.sub(r"^```json\s*|\s*```$", "", text, flags=re.MULTILINE).strip()
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        return {"placeholders": {}, "ringkasan": text}
 
 
 # =============================================================================
@@ -653,47 +626,18 @@ with st.sidebar:
     skiprows = st.number_input("Lewati baris pertama (skiprows)", min_value=0, value=6, step=1)
 
     st.divider()
-    st.header("🔢 Buat Terbilang")
-    st.caption("Daftarkan key yang perlu dibuatkan terbilang otomatis.")
-
-    if "tb_rows" not in st.session_state:
-        st.session_state.tb_rows = [{"src": "", "caps": "", "title": ""}]
-
-    tb_rows_ui: list[dict] = []
-    for i, cfg in enumerate(st.session_state.tb_rows):
-        st.markdown(f"**Key #{i + 1}**")
-        src = st.text_input(
-            "Key sumber", value=cfg["src"], key=f"tb_src_{i}",
-            placeholder="NP_nominal",
-            label_visibility="collapsed",
-        )
-        c1, c2 = st.columns(2)
-        caps  = c1.text_input(
-            "ALL CAPS", value=cfg["caps"], key=f"tb_caps_{i}",
-            placeholder="NP_kalimat_cap",
-            label_visibility="collapsed",
-        )
-        title = c2.text_input(
-            "Title Case", value=cfg["title"], key=f"tb_title_{i}",
-            placeholder="NP_kalimat",
-            label_visibility="collapsed",
-        )
-        tb_rows_ui.append({"src": src.strip(), "caps": caps.strip(), "title": title.strip()})
-
-    if st.button("＋ Tambah key"):
-        st.session_state.tb_rows = tb_rows_ui + [{"src": "", "caps": "", "title": ""}]
-        st.rerun()
-    else:
-        st.session_state.tb_rows = tb_rows_ui
-
-    # Bangun map dari input sidebar (hanya baris dengan key sumber yang diisi)
-    terbilang_map_sidebar: dict[str, str] = {}
-    title_map_sidebar:     dict[str, str] = {}
-    for cfg in tb_rows_ui:
-        if not cfg["src"]:
-            continue
-        terbilang_map_sidebar[cfg["src"]] = cfg["caps"]  or cfg["src"] + "_TERBILANG"
-        title_map_sidebar[cfg["src"]]     = cfg["title"] or cfg["src"] + "_TERBILANG_TITLE"
+    st.header("🔢 Terbilang Otomatis")
+    st.caption(
+        "Tambahkan akhiran pada key Excel di template Word. "
+        "Contoh untuk key `NP_nominal` = 200000000:"
+    )
+    st.markdown(
+        "- `{{NP_nominal}}` → 200.000.000,00\n"
+        "- `{{NP_nominal_FORMAT}}` → Rp 200.000.000,00\n"
+        "- `{{NP_nominal_TERBILANG}}` → DUA RATUS JUTA RUPIAH\n"
+        "- `{{NP_nominal_TERBILANG_TITLE}}` → Dua Ratus Juta Rupiah"
+    )
+    st.caption("Key sumber diformat ribuan hanya bila salah satu akhiran dipakai.")
 
     st.divider()
     st.header("🔄 Find & Replace")
@@ -735,105 +679,62 @@ if excel_file:
         st.error(f"Gagal membaca Excel: {e}")
         st.stop()
 
+    # Format tanggal/angka sebelum ditampilkan, agar yang terlihat di tabel
+    # sama persis dengan yang akan ditempel ke laporan.
+    df_excel = df_excel.apply(lambda col: col.map(format_nilai))
+
     st.subheader("📊 Tabel Data pada Lembar Kerja (edit jika perlu)")
     df_editable = st.data_editor(df_excel, num_rows="dynamic", use_container_width=True)
 
-    data_dict: dict = {}
+    data_excel: dict[str, str] = {}
     for _, row in df_editable.iterrows():
-        key = row.iloc[0]
-        value = row.iloc[1]
-        if pd.notnull(key):
-            data_dict[str(key)] = str(value) if pd.notnull(value) else ""
-
-    # Gunakan map dari sidebar (bukan dari kolom Excel — lebih eksplisit)
-    terbilang_map = terbilang_map_sidebar
-    title_map     = title_map_sidebar
+        key = format_nilai(row.iloc[0])
+        if key:
+            data_excel[key] = format_nilai(row.iloc[1])
 
     # ---------------------------------------------------------------------------
-    # Auto-generate terbilang & format Rupiah — hanya untuk key yang didaftarkan
+    # Pindai placeholder template & buat terbilang otomatis dari akhiran nama
     # ---------------------------------------------------------------------------
-    auto_tb = generate_auto_terbilang(data_dict, terbilang_map, title_map)
+    placeholders_per_file: dict[str, list[str]] = {}
+    for wf in word_files or []:
+        wf.seek(0)
+        for ph in collect_placeholders(Document(wf)):
+            placeholders_per_file.setdefault(ph, []).append(wf.name)
+        wf.seek(0)
 
-    if auto_tb:
-        # Kumpulkan satu info per key sumber (untuk UI)
-        seen_src: dict[str, dict] = {}
-        for tb_key, info in auto_tb.items():
-            src = info["sumber"]
+    auto_tb, peringatan_tb = generate_auto_terbilang(data_excel, set(placeholders_per_file))
+    data_dict = {**data_excel, **auto_tb}
 
-            # Isi nilai ke data_dict
-            if tb_key.endswith("_FORMAT"):
-                data_dict[tb_key] = info["format_rp"]
-            elif tb_key == title_map.get(src) or tb_key.endswith("_TERBILANG_TITLE"):
-                data_dict[tb_key] = info["terbilang_title"]
-            else:
-                data_dict[tb_key] = info["terbilang"]
-
-            # Perbarui source key → format Indonesia (hanya key yang ditandai)
-            data_dict[src] = info["format_angka"]
-
-            seen_src[src] = info   # simpan untuk UI
-
-        rows_tb = []
-        for src, info in seen_src.items():
-            cap_key   = terbilang_map.get(src, src + "_TERBILANG")
-            title_key = title_map.get(src,     src + "_TERBILANG_TITLE")
-            rows_tb.append({
-                "Sumber":                 f"{{{{{src}}}}}",
-                "Diformat (tanpa Rp)":    info["format_angka"],
-                "Placeholder _FORMAT":    "{{" + src + "_FORMAT}}",
-                "Placeholder ALL CAPS":   f"{{{{{cap_key}}}}}",
-                "Isi ALL CAPS":           info["terbilang"],
-                "Placeholder Title Case": f"{{{{{title_key}}}}}",
-                "Isi Title Case":         info["terbilang_title"],
-            })
-
-        with st.expander("🔢 Terbilang & Format Rupiah yang Dibuat Otomatis", expanded=True):
-            st.caption(
-                "Hanya key yang ditandai di kolom ke-3 atau ke-4 Excel yang diproses. "
-                "Copy nama placeholder dari kolom di bawah ke template Word."
-            )
-            if rows_tb:
-                st.dataframe(pd.DataFrame(rows_tb), use_container_width=True)
-            else:
-                st.info(
-                    "Belum ada key yang ditandai. "
-                    "Isi kolom ke-3 Excel dengan nama placeholder terbilang "
-                    "(contoh: untuk baris `NP_nominal`, isi kolom ke-3 dengan `NP_kalimat_cap`)."
+    # ---------------------------------------------------------------------------
+    # Cek kecocokan placeholder template vs data
+    # ---------------------------------------------------------------------------
+    if word_files:
+        st.subheader("✅ Cek Kelengkapan Data")
+        check_df = build_placeholder_check(
+            placeholders_per_file, data_excel, data_dict, peringatan_tb
+        )
+        if check_df.empty:
+            st.info("Tidak ada placeholder {{...}} di template.")
+        else:
+            jumlah_ok = check_df["Status"].str.startswith("✅").sum()
+            jumlah_masalah = len(check_df) - jumlah_ok
+            if jumlah_masalah:
+                st.warning(
+                    f"{jumlah_masalah} dari {len(check_df)} placeholder perlu diperiksa."
                 )
+            else:
+                st.success(f"Semua {len(check_df)} placeholder terisi.")
+            st.dataframe(check_df, use_container_width=True, hide_index=True)
 
-    # ---------------------------------------------------------------------------
-    # Fitur AI: Analisis Struktur Template
-    # ---------------------------------------------------------------------------
-    if word_files and claude_ready:
-        with st.expander("🔍 Analisis Placeholder Template dengan AI", expanded=False):
-            if st.button("Jalankan Analisis Template"):
-                with st.spinner("Claude sedang membaca template..."):
-                    client = _get_client(api_key)
-                    all_texts = []
-                    for wf in word_files:
-                        doc_tmp = Document(wf)
-                        all_texts.append(extract_text_from_docx(doc_tmp))
-                        wf.seek(0)
-                    combined = "\n\n".join(all_texts)
-                    result = analyze_template_ai(combined, client)
-
-                if result.get("placeholders"):
-                    rows_analysis = []
-                    for ph_key, info in result["placeholders"].items():
-                        rows_analysis.append(
-                            {
-                                "Placeholder": f"{{{{{ph_key}}}}}",
-                                "Arti": info.get("arti", ""),
-                                "Format": info.get("format", ""),
-                                "Wajib": "✅ Ya" if info.get("wajib") else "➖ Opsional",
-                                "Terisi": "✅" if ph_key in data_dict and data_dict[ph_key] else "❌",
-                            }
-                        )
-                    st.dataframe(pd.DataFrame(rows_analysis), use_container_width=True)
-                    if result.get("ringkasan"):
-                        st.info(result["ringkasan"])
-                else:
-                    st.write(result.get("ringkasan", "Tidak ada placeholder ditemukan."))
+        dipakai = set(placeholders_per_file) | {
+            _pecah_turunan(ph)[0] for ph in placeholders_per_file
+        }
+        tidak_dipakai = sorted(set(data_excel) - dipakai)
+        if tidak_dipakai:
+            st.caption(
+                f"{len(tidak_dipakai)} key Excel tidak dipakai di template: "
+                + ", ".join(f"`{k}`" for k in tidak_dipakai)
+            )
 
     # ---------------------------------------------------------------------------
     # Preview & proses setiap file Word
@@ -846,10 +747,8 @@ if excel_file:
             output_file, updated_doc = process_files(word_file, data_dict, active_pairs or None)
             raw_text = extract_text_from_docx(updated_doc)
             preview_text = highlight_placeholders(raw_text)
-            consistency_df, number_ints, normalized_verbal = check_value_consistency_table(
-                raw_text
-            )
-            remaining = scan_remaining_placeholders(raw_text)
+            consistency_df = check_value_consistency_table(raw_text)
+            remaining = sorted(collect_placeholders(updated_doc), key=str.lower)
 
             with st.expander(f"📁 {word_file.name}", expanded=True):
 
@@ -857,7 +756,7 @@ if excel_file:
                 if remaining:
                     st.error(
                         f"**{len(remaining)} placeholder belum terganti:** "
-                        + ", ".join(f"`{p}`" for p in remaining)
+                        + ", ".join(f"`{{{{{p}}}}}`" for p in remaining)
                     )
 
                 # -- Preview teks --
@@ -872,53 +771,13 @@ if excel_file:
 
                 # -- Tabel konsistensi nominal --
                 if not consistency_df.empty:
-                    st.markdown("🔍 **Cek Konsistensi Nominal Angka vs Kata**")
+                    st.markdown("🔍 **Cek Konsistensi Nominal Angka vs Terbilang**")
+                    st.dataframe(consistency_df, use_container_width=True, hide_index=True)
 
-                    # Tombol validasi AI (hanya tampil jika API key tersedia)
-                    if claude_ready and number_ints:
-                        if st.button(
-                            "✅ Validasi Terbilang dengan AI",
-                            key=word_file.name + "_val_btn",
-                        ):
-                            client = _get_client(api_key)
-                            ai_results = []
-                            progress = st.progress(0, text="Memvalidasi dengan Claude...")
-                            for i, (angka, kata) in enumerate(
-                                zip_longest(number_ints, normalized_verbal, fillvalue="(tidak ditemukan)")
-                            ):
-                                if isinstance(angka, int) and kata != "(tidak ditemukan)":
-                                    res = validate_terbilang_ai(angka, kata, client)
-                                    if res.get("valid") is True:
-                                        ai_results.append("✅ Benar")
-                                    elif res.get("valid") is False:
-                                        koreksi = res.get("koreksi", "")
-                                        ai_results.append(f"❌ Salah — Seharusnya: {koreksi}")
-                                    else:
-                                        ai_results.append("⚠️ Tidak dapat divalidasi")
-                                else:
-                                    ai_results.append("⚠️ Tidak cocok")
-                                progress.progress(
-                                    (i + 1) / max(len(number_ints), len(normalized_verbal), 1)
-                                )
-                            progress.empty()
-
-                            consistency_df["Validasi AI"] = ai_results
-                            st.session_state[word_file.name + "_consistency"] = consistency_df
-
-                    # Tampilkan tabel (dari session state jika sudah divalidasi AI)
-                    display_df = st.session_state.get(
-                        word_file.name + "_consistency", consistency_df
-                    )
-                    st.dataframe(display_df, use_container_width=True)
-
-                    has_error = "⚠️" in display_df.get("Keterangan (Regex)", pd.Series()).values or (
-                        "Validasi AI" in display_df.columns
-                        and display_df["Validasi AI"].str.contains("❌|⚠️").any()
-                    )
-                    if has_error:
+                    if consistency_df["Status"].str.startswith("❌").any():
                         st.warning("Terdapat ketidaksesuaian nominal — periksa sebelum diunduh.")
-                    elif "Validasi AI" in display_df.columns:
-                        st.success("Semua nominal tervalidasi AI — sesuai.")
+                    else:
+                        st.success("Semua nominal sesuai dengan terbilangnya.")
 
                 # -- Review dokumen lengkap dengan AI --
                 if claude_ready:
