@@ -1,6 +1,8 @@
 """SRR Kalibata Report Maker — UI Streamlit. Logika inti ada di paket report_maker."""
 import hashlib
+import importlib
 import os
+import sys
 import zipfile
 from io import BytesIO
 from pathlib import Path
@@ -8,6 +10,26 @@ from pathlib import Path
 import anthropic
 import pandas as pd
 import streamlit as st
+
+# Saat repo diperbarui (mis. push ke Streamlit Cloud), Streamlit menjalankan
+# ulang file ini tetapi modul report_maker tetap versi lama di memori, sehingga
+# impor fungsi baru gagal (ImportError). Muat ulang paket bila filenya berubah.
+_FOLDER_PAKET = Path(__file__).parent / "report_maker"
+# Urutan dependensi: modul yang diimpor modul lain dimuat ulang lebih dulu
+_URUTAN_MODUL = ["terbilang", "ai", "docx_engine", "checks", "pdf", "lembar_kerja", "penyesuaian"]
+
+
+def _jejak_paket() -> tuple:
+    return tuple(sorted(
+        (f.name, f.stat().st_mtime_ns, f.stat().st_size) for f in _FOLDER_PAKET.glob("*.py")
+    ))
+
+
+_paket = sys.modules.get("report_maker")
+if _paket is not None and getattr(_paket, "_jejak", None) != _jejak_paket():
+    for _nama in _URUTAN_MODUL:
+        if (_modul := sys.modules.get(f"report_maker.{_nama}")) is not None:
+            importlib.reload(_modul)
 
 from report_maker.ai import get_client, review_document_ai
 from report_maker.checks import (
@@ -42,6 +64,8 @@ from report_maker.penyesuaian import (
     validasi_usulan,
 )
 from report_maker.terbilang import format_nilai, generate_auto_terbilang, pecah_turunan
+
+sys.modules["report_maker"]._jejak = _jejak_paket()
 
 MIME_DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
