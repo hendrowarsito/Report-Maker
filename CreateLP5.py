@@ -3,6 +3,7 @@ import hashlib
 import numbers
 import re
 from io import BytesIO
+from pathlib import Path
 import zipfile
 
 import anthropic
@@ -10,13 +11,29 @@ import pandas as pd
 import streamlit as st
 from docx import Document
 
+# Logo opsional: taruh file di assets/logo_srr.png (atau .jpg / .svg)
+LOGO_PATH = next(
+    (
+        p for ext in ("png", "jpg", "jpeg", "svg")
+        if (p := Path(__file__).parent / "assets" / f"logo_srr.{ext}").exists()
+    ),
+    None,
+)
+
 st.set_page_config(
     page_title="SRR Kalibata Report Maker",
+    page_icon=str(LOGO_PATH) if LOGO_PATH else "📄",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
-st.title("SRR Kalibata Report Maker")
-st.caption("Isi template laporan Word dari data Excel secara otomatis.")
+
+if LOGO_PATH:
+    col_logo, col_judul = st.columns([1, 8], vertical_alignment="center")
+    col_logo.image(str(LOGO_PATH), use_container_width=True)
+else:
+    col_judul = st.container()
+col_judul.title("SRR Kalibata Report Maker")
+col_judul.caption("Isi template laporan Word dari data Excel secara otomatis.")
 
 
 # =============================================================================
@@ -396,6 +413,30 @@ def collect_placeholders(doc: Document) -> set[str]:
     return nama
 
 
+_POLA_KEY = re.compile(r"^[A-Za-z_][\w.-]*$")
+
+
+def deteksi_baris_awal(
+    kolom_key: list[str], kolom_nilai: list[str], placeholders: set[str]
+) -> int:
+    """
+    Tebak baris pertama data (key | nilai) di sheet Excel, berbasis 0.
+
+    Cari baris pertama yang key-nya dipakai di template, lalu mundur selama
+    baris di atasnya masih berbentuk key (tanpa spasi) dan punya nilai — agar
+    key yang tidak dipakai template di awal tabel tetap ikut. Kop/judul
+    ("Laporan Penilaian", "LAPORAN" tanpa nilai) tidak ikut terambil.
+    Kembalikan 0 jika tidak ada key template yang ditemukan.
+    """
+    dikenal = placeholders | {_pecah_turunan(ph)[0] for ph in placeholders}
+    for i, key in enumerate(kolom_key):
+        if key in dikenal:
+            while i > 0 and _POLA_KEY.match(kolom_key[i - 1]) and kolom_nilai[i - 1]:
+                i -= 1
+            return i
+    return 0
+
+
 # =============================================================================
 # Find & Replace langsung (tanpa placeholder, tanpa API)
 # =============================================================================
@@ -599,11 +640,36 @@ word_files = col_word.file_uploader(
 )
 excel_file = col_excel.file_uploader("Data Lembar Kerja (.xlsx)", type=["xlsx"])
 
+sheet_names: list[str] = []
+if excel_file:
+    try:
+        sheet_names = pd.ExcelFile(excel_file, engine="openpyxl").sheet_names
+    except Exception as e:
+        st.error(f"Gagal membaca Excel: {e}")
+        st.stop()
+    finally:
+        excel_file.seek(0)
+
 with st.expander("⚙️ Pengaturan"):
     st.markdown("**Excel**")
     c1, c2 = st.columns(2)
-    sheet_name = c1.text_input("Nama Sheet", value="Laporan")
-    skiprows = c2.number_input("Lewati baris pertama", min_value=0, value=6, step=1)
+    if sheet_names:
+        sheet_name = c1.selectbox(
+            "Sheet",
+            sheet_names,
+            index=sheet_names.index("Laporan") if "Laporan" in sheet_names else 0,
+        )
+    else:
+        sheet_name = None
+        c1.selectbox("Sheet", [], placeholder="Upload Excel dulu", disabled=True)
+    skiprows = c2.number_input(
+        "Lewati baris pertama",
+        min_value=0,
+        value=None,
+        step=1,
+        placeholder="Otomatis",
+        help="Kosongkan agar baris awal data dideteksi dari key yang dipakai template.",
+    )
 
     st.markdown("**Find & Replace** — ganti kata langsung di dokumen, tanpa placeholder.")
     df_fr = st.data_editor(
@@ -653,19 +719,39 @@ if not (word_files and excel_file):
 # ---------------------------------------------------------------------------
 try:
     df_excel = pd.read_excel(
-        excel_file,
-        header=None,
-        skiprows=int(skiprows),
-        sheet_name=sheet_name,
-        engine="openpyxl",
+        excel_file, header=None, sheet_name=sheet_name, engine="openpyxl"
     )
 except Exception as e:
     st.error(f"Gagal membaca Excel: {e}")
     st.stop()
 
+if df_excel.shape[1] < 2:
+    st.error(f"Sheet **{sheet_name}** harus punya minimal 2 kolom: key dan nilai.")
+    st.stop()
+
 # Format tanggal/angka sebelum ditampilkan, agar yang terlihat di tabel
 # sama persis dengan yang akan ditempel ke laporan.
 df_excel = df_excel.apply(lambda col: col.map(format_nilai))
+
+# Pindai placeholder template (dipakai juga untuk mendeteksi baris awal data)
+placeholders_per_file: dict[str, list[str]] = {}
+for wf in word_files:
+    wf.seek(0)
+    for ph in collect_placeholders(Document(wf)):
+        placeholders_per_file.setdefault(ph, []).append(wf.name)
+    wf.seek(0)
+
+if skiprows is None:
+    baris_awal = deteksi_baris_awal(
+        df_excel.iloc[:, 0].tolist(),
+        df_excel.iloc[:, 1].tolist(),
+        set(placeholders_per_file),
+    )
+    sumber_baris = "terdeteksi otomatis"
+else:
+    baris_awal = int(skiprows)
+    sumber_baris = "diatur manual"
+df_excel = df_excel.iloc[baris_awal:].reset_index(drop=True)
 
 
 # ---------------------------------------------------------------------------
@@ -674,6 +760,10 @@ df_excel = df_excel.apply(lambda col: col.map(format_nilai))
 st.divider()
 st.subheader("② Periksa")
 
+st.caption(
+    f"Data dibaca dari sheet **{sheet_name}** mulai baris ke-{baris_awal + 1} "
+    f"({sumber_baris}). Ubah di ⚙️ Pengaturan bila keliru."
+)
 with st.expander("✏️ Data Excel (bisa diedit)"):
     df_editable = st.data_editor(df_excel, num_rows="dynamic", use_container_width=True)
 
@@ -683,14 +773,7 @@ for _, row in df_editable.iterrows():
     if key:
         data_excel[key] = format_nilai(row.iloc[1])
 
-# Pindai placeholder template & buat terbilang otomatis dari akhiran nama
-placeholders_per_file: dict[str, list[str]] = {}
-for wf in word_files:
-    wf.seek(0)
-    for ph in collect_placeholders(Document(wf)):
-        placeholders_per_file.setdefault(ph, []).append(wf.name)
-    wf.seek(0)
-
+# Buat terbilang otomatis dari akhiran nama placeholder
 auto_tb, peringatan_tb = generate_auto_terbilang(data_excel, set(placeholders_per_file))
 data_dict = {**data_excel, **auto_tb}
 
