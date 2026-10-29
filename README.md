@@ -32,7 +32,13 @@ Aplikasi terbuka di `http://localhost:8501` dengan dua halaman (menu di atas).
    penggantian (paragraf, teks lama → teks baru) bisa dilihat sebelum unduh.
    Kolom *Muncul di* menunjukkan file mana saja yang memuat data itu — satu
    pilihan diterapkan seragam di semua bab dan surat.
-6. **Unduh** laporan (.docx, dan PDF bila LibreOffice tersedia). Banyak file
+6. **Preview** laporan sebelum diunduh:
+   - *Tampilan halaman* — halaman laporan persis seperti hasil cetak (butuh
+     LibreOffice), bisa disaring ke halaman yang berubah saja.
+   - *Perubahan teks* — setiap paragraf yang berubah, teks lama dicoret dan
+     teks baru disorot.
+   Ubah pilihan di tabel temuan bila ada yang keliru; preview ikut diperbarui.
+7. **Unduh** laporan (.docx, dan PDF bila LibreOffice tersedia). Banyak file
    diunduh sekaligus sebagai .zip, atau satu per satu. Placeholder yang
    tersisa dan nominal yang tidak sesuai terbilang diperingatkan per file.
 
@@ -197,6 +203,7 @@ report_maker/
   lembar_kerja.py          baca sel lembar kerja & pemetaan placeholder → sel
   analisis.py              analisis template + sumber, cek konsistensi antarsumber
   pekerjaan.py             analisis di latar belakang + simpan hasil ke disk
+  preview.py               gambar halaman dari PDF & daftar perubahan teks
   pdf.py                   konversi .docx → PDF lewat LibreOffice
 assets/logo_srr.png        logo di header dan ikon tab
 .streamlit/config.toml     tema warna SRR

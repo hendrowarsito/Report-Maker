@@ -3,3 +3,4 @@ pandas==3.0.5
 python-docx==1.2.0
 openpyxl==3.1.5
 anthropic==2.3.0
+pypdfium2==5.14.0

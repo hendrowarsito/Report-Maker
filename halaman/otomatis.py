@@ -6,7 +6,7 @@ Laporan otomatis — tanpa placeholder.
 2-4. Claude membaca template, menemukan data objek yang harus diisi, mengambil
      nilainya dari tiap sumber, dan mengecek konsistensi antarsumber
 5. Penilai memeriksa tabel temuan dan memilih sumber yang dipakai
-6. Unduh laporan
+6. Preview laporan, lalu unduh
 """
 import hashlib
 import os
@@ -26,6 +26,7 @@ from report_maker.checks import check_value_consistency_table
 from report_maker.docx_engine import bandingkan_format, isi_dokumen
 from report_maker.pdf import docx_ke_pdf, pdf_tersedia
 from report_maker.penyesuaian import daftar_paragraf, terapkan_penyesuaian, validasi_usulan
+from report_maker.preview import gambar_halaman, halaman_berubah, perubahan_html, teks_per_halaman
 
 MIME_DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 ISI_MANUAL = "Isi manual"
@@ -41,6 +42,16 @@ def _paragraf(docx_bytes: bytes) -> dict[int, str]:
 @st.cache_data(show_spinner=False, max_entries=20)
 def _pdf(docx_bytes: bytes) -> bytes:
     return docx_ke_pdf(docx_bytes)
+
+
+@st.cache_data(show_spinner=False, max_entries=20)
+def _teks_halaman(pdf: bytes) -> list[str]:
+    return teks_per_halaman(pdf)
+
+
+@st.cache_data(show_spinner=False, max_entries=200)
+def _gambar_halaman(pdf: bytes, nomor: int) -> bytes:
+    return gambar_halaman(pdf, nomor)
 
 
 def _api_key() -> str:
@@ -359,11 +370,8 @@ with st.expander(f"Rincian {jumlah_perubahan} perubahan yang akan ditulis ke lap
         st.write("Tidak ada perubahan — template sudah sesuai dengan pilihan di atas.")
 
 # ---------------------------------------------------------------------------
-# ④ Unduh
+# ④ Preview
 # ---------------------------------------------------------------------------
-st.divider()
-st.subheader("④ Unduh laporan")
-
 hasil: dict[str, bytes] = {}
 masalah: list[str] = []
 jumlah = 0
@@ -381,6 +389,66 @@ for nama in nama_template:
         )
     for _, r in salah_nominal.iterrows():
         masalah.append(f"**{nama}** — {r['Angka (Rp)']} ({r['Terbilang di Dokumen']}): {r['Status']}")
+
+st.divider()
+st.subheader("④ Preview laporan")
+st.caption("Periksa tampilan akhir sebelum diunduh. Ubah pilihan di tabel ③ bila ada yang keliru — preview ikut diperbarui.")
+
+dok = (
+    st.selectbox("Dokumen", nama_template, key="preview_dokumen")
+    if len(nama_template) > 1 else nama_template[0]
+)
+perubahan_dok = perubahan_per_file.get(dok, [])
+tab_halaman, tab_teks = st.tabs(["Tampilan halaman", f"Perubahan teks ({len(perubahan_dok)})"])
+
+with tab_halaman:
+    if not pdf_tersedia():
+        st.info(
+            "Preview halaman butuh LibreOffice di server (lihat README). "
+            "Perubahan tetap bisa diperiksa di tab **Perubahan teks**."
+        )
+    else:
+        try:
+            with st.spinner("Menyiapkan preview..."):
+                pdf_dok = _pdf(hasil[dok])
+                teks_halaman = _teks_halaman(pdf_dok)
+        except RuntimeError as e:
+            st.error(str(e))
+        else:
+            berubah = halaman_berubah(teks_halaman, [u.teks_baru for u in perubahan_dok])
+            c1, c2 = st.columns([2, 3])
+            hanya_berubah = c1.toggle(
+                "Hanya halaman yang berubah", value=bool(berubah), disabled=not berubah,
+                key=f"preview_berubah_{dok}",
+            )
+            daftar = berubah if hanya_berubah and berubah else list(range(1, len(teks_halaman) + 1))
+            c2.caption(
+                f"{len(teks_halaman)} halaman · ada perubahan di halaman "
+                f"{', '.join(map(str, berubah)) or '—'}"
+            )
+            if len(daftar) > 1:
+                nomor = st.select_slider(
+                    "Halaman", options=daftar, key=f"preview_halaman_{dok}_{hanya_berubah}"
+                )
+            else:
+                nomor = daftar[0]
+            st.image(_gambar_halaman(pdf_dok, nomor), caption=f"{dok} — halaman {nomor}", width=820)
+
+with tab_teks:
+    if not perubahan_dok:
+        st.write("Tidak ada perubahan di dokumen ini.")
+    for nomor, isi in perubahan_html(paragraf_per_file[dok], perubahan_dok):
+        st.markdown(
+            f'<div style="border-left:3px solid #312266;padding:4px 10px;margin:6px 0">'
+            f'<small style="opacity:.6">Paragraf [{nomor}]</small><br>{isi}</div>',
+            unsafe_allow_html=True,
+        )
+
+# ---------------------------------------------------------------------------
+# ⑤ Unduh
+# ---------------------------------------------------------------------------
+st.divider()
+st.subheader("⑤ Unduh laporan")
 
 if masalah:
     st.warning("Periksa sebelum dikirim:\n" + "\n".join(f"- {m}" for m in masalah))

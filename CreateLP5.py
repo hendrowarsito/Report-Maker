@@ -12,7 +12,7 @@ _FOLDER_PAKET = Path(__file__).parent / "report_maker"
 # Urutan dependensi: modul yang diimpor modul lain dimuat ulang lebih dulu
 _URUTAN_MODUL = [
     "terbilang", "ai", "docx_engine", "checks", "pdf",
-    "lembar_kerja", "penyesuaian", "analisis", "pekerjaan",
+    "lembar_kerja", "penyesuaian", "analisis", "pekerjaan", "preview",
 ]
 
 
