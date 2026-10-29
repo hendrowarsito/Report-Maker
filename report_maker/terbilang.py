@@ -150,14 +150,35 @@ def format_tanggal(d: datetime.date) -> str:
     return f"{d.day} {_BULAN[d.month - 1]} {d.year}"
 
 
-def format_nilai(value) -> str:
+# Key yang nilainya nomor/kode, bukan besaran: jangan diberi titik ribuan
+_POLA_KEY_IDENTITAS = re.compile(
+    r"(^|_)(nib|nik|npwp|nop|kode|kodepos|pos|telp|telepon|hp|phone|fax|nomor|no|"
+    r"rek|rekening|tahun|thn|year|id|rt|rw|blok|kav)(_|$|\d)",
+    re.IGNORECASE,
+)
+BATAS_RIBUAN = 10_000   # di bawah ini (mis. tahun 2026, luas 416) angka ditulis apa adanya
+
+
+def format_ribuan(n: float, desimal: int | None = None) -> str:
+    """1234567 → '1.234.567'; 1234.5 → '1.234,5' (desimal koma, tanpa nol berlebih)."""
+    if desimal is None:
+        teks = f"{n:,.6f}".rstrip("0").rstrip(".")
+    else:
+        teks = f"{n:,.{desimal}f}"
+    return teks.replace(",", "_").replace(".", ",").replace("_", ".")
+
+
+def format_nilai(value, kunci: str = "") -> str:
     """
     Ubah nilai sel Excel ke teks siap tempel di laporan.
       • kosong / NaN          → ''
-      • 200000000.0           → '200000000'   (tanpa '.0')
-      • 0.25                  → '0,25'        (desimal koma)
+      • 595400000             → '595.400.000'  (titik ribuan bila ≥ 10.000)
+      • 2026, 416             → '2026', '416'  (angka kecil apa adanya)
+      • 0.25                  → '0,25'         (desimal koma)
       • datetime(2026, 4, 28) → '28 April 2026'
       • teks                  → apa adanya (spasi di tepi dibuang)
+    kunci: nama data (mis. "kode_pos", "nib") — bila berupa nomor/kode,
+    angka ditulis tanpa titik ribuan.
     """
     if value is None or (not isinstance(value, str) and pd.isna(value)):
         return ""
@@ -172,12 +193,16 @@ def format_nilai(value) -> str:
         return format_tanggal(value)
     if isinstance(value, datetime.time):
         return f"{value:%H:%M}"
-    if isinstance(value, numbers.Integral):
-        return str(int(value))
     if isinstance(value, numbers.Real):
-        if float(value).is_integer():
-            return str(int(value))
-        return f"{value:.6f}".rstrip("0").rstrip(".").replace(".", ",")
+        angka = float(value)
+        if angka.is_integer():
+            angka = int(angka)
+        identitas = bool(kunci) and _POLA_KEY_IDENTITAS.search(kunci) is not None
+        if abs(angka) >= BATAS_RIBUAN and not identitas:
+            return format_ribuan(angka)
+        if isinstance(angka, int):
+            return str(angka)
+        return f"{angka:.6f}".rstrip("0").rstrip(".").replace(".", ",")
     return str(value).strip()
 
 

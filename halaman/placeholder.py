@@ -15,6 +15,7 @@ from report_maker.checks import (
     deteksi_baris_awal,
 )
 from report_maker.docx_engine import (
+    bandingkan_format,
     highlight_placeholders,
     konteks_placeholder,
     isi_dokumen,
@@ -373,6 +374,10 @@ else:
 
     # Format tanggal/angka sebelum ditampilkan, agar yang terlihat di tabel
     # sama persis dengan yang akan ditempel ke laporan.
+    # Kolom nilai diformat dengan konteks key-nya (kode pos/NIB tanpa titik ribuan)
+    kunci_baris = df_excel.iloc[:, 0].map(format_nilai)
+    kolom_nilai = df_excel.columns[1]
+    df_excel[kolom_nilai] = [format_nilai(v, k) for k, v in zip(kunci_baris, df_excel[kolom_nilai])]
     df_excel = df_excel.apply(lambda col: col.map(format_nilai))
 
     if skiprows is None:
@@ -398,7 +403,7 @@ else:
     for _, row in df_editable.iterrows():
         key = format_nilai(row.iloc[0])
         if key:
-            data_excel[key] = format_nilai(row.iloc[1])
+            data_excel[key] = format_nilai(row.iloc[1], key)
 
 # Buat terbilang otomatis dari akhiran nama placeholder
 auto_tb, peringatan_tb = generate_auto_terbilang(data_excel, set(placeholders_per_file))
@@ -644,6 +649,19 @@ if ada_masalah:
 else:
     st.success("Semua dokumen siap diunduh.")
     boleh_unduh = True
+
+# Bukti format tidak berubah: hanya isi teks yang boleh berbeda dari template
+format_berubah = {
+    nama: bagian for nama, isi in processed_files
+    if (bagian := bandingkan_format(template_bytes[nama], isi))
+}
+if format_berubah:
+    st.error(
+        "Format berubah di luar isi teks — jangan kirim sebelum diperiksa:\n"
+        + "\n".join(f"- **{n}**: {', '.join(b)}" for n, b in format_berubah.items())
+    )
+else:
+    st.caption("✅ Format template utuh — diverifikasi: hanya isi teks yang berubah.")
 
 if pdf_tersedia():
     sertakan_pdf = st.toggle("Sertakan PDF", disabled=not boleh_unduh)

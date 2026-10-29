@@ -56,8 +56,12 @@ def test_parse_ke_int(nilai, hasil):
     (None, ""),
     (float("nan"), ""),
     (pd.NaT, ""),
-    (200_000_000.0, "200000000"),
+    (200_000_000.0, "200.000.000"),
+    (595_400_000, "595.400.000"),
+    (416_000, "416.000"),
     (150, "150"),
+    (2026, "2026"),
+    (1234567.5, "1.234.567,5"),
     (0.25, "0,25"),
     (1234.5, "1234,5"),
     (datetime.datetime(2026, 4, 28), "28 April 2026"),
@@ -91,3 +95,15 @@ def test_generate_auto_terbilang_sumber_bukan_angka_dan_nilai_excel_menang():
     )
     assert tambahan == {}
     assert peringatan == {"nama_TERBILANG": "Nilai {{nama}} bukan angka"}
+
+
+@pytest.mark.parametrize("kunci, nilai, teks", [
+    ("np_nominal", 595_400_000, "595.400.000"),
+    ("kode_pos", 10220, "10220"),
+    ("nib", 10_220_304_050_607, "10220304050607"),
+    ("nomor_shm", 15000, "15000"),
+    ("tahun_bangun", 1998, "1998"),
+    ("luas_tanah", 416, "416"),
+])
+def test_format_nilai_dengan_kunci(kunci, nilai, teks):
+    assert format_nilai(nilai, kunci) == teks

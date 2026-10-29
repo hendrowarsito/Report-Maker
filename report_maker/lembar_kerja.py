@@ -17,17 +17,12 @@ import anthropic
 import openpyxl
 
 from .ai import minta_json
-from .terbilang import format_nilai, pecah_turunan
+from .terbilang import format_nilai, format_ribuan, pecah_turunan
 
 
 # =============================================================================
 # Membaca sel lembar kerja
 # =============================================================================
-
-def _angka_id(n: float, desimal: int) -> str:
-    """1234567.5, 2 → '1.234.567,50'"""
-    return f"{n:,.{desimal}f}".replace(",", "_").replace(".", ",").replace("_", ".")
-
 
 def format_sel(nilai, number_format: str | None = "General") -> str:
     """
@@ -42,9 +37,9 @@ def format_sel(nilai, number_format: str | None = "General") -> str:
         return format_nilai(nilai)
     desimal = len(m.group(1)) if (m := re.search(r"0\.(0+)", fmt)) else 0
     if "%" in fmt:
-        return _angka_id(nilai * 100, desimal) + "%"
+        return format_ribuan(nilai * 100, desimal) + "%"
     if "#,##0" in fmt:
-        return _angka_id(nilai, desimal)
+        return format_ribuan(nilai, desimal)
     return format_nilai(nilai)
 
 

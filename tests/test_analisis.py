@@ -32,6 +32,9 @@ from report_maker.penyesuaian import Usulan
     ("angka", "0999", "1234", "1234"),
     ("angka", "250", "0312", "0312"),
     ("angka", "250", "1.312", "1312"),
+    # Placeholder tidak memberi contoh format: angka besar diberi titik ribuan
+    ("angka", "{{nilai_pasar}}", "595400000", "595.400.000"),
+    ("teks", "{{nilai_pasar}}", "595.400.000", "595.400.000"),
 ])
 def test_teks_pengganti(bentuk, teks_lama, nilai, hasil):
     assert teks_pengganti(Kemunculan(0, teks_lama, bentuk), nilai) == hasil
@@ -75,6 +78,8 @@ def _xlsx() -> bytes:
     ws = wb.active
     ws.title = "LK Tanah"
     ws["B2"], ws["C2"] = "Luas tanah", 312
+    ws["B3"], ws["C3"] = "Nilai pasar", 595400000
+    ws["C3"].number_format = "General"
     out = BytesIO()
     wb.save(out)
     return out.getvalue()
@@ -94,6 +99,7 @@ def test_blok_sumber_per_jenis_file():
     xlsx, sel = blok_sumber("LK.xlsx", _xlsx())
     assert "B2: Luas tanah | C2: 312" in xlsx["text"] and sel == {
         "LK Tanah!B2": "Luas tanah", "LK Tanah!C2": "312",
+        "LK Tanah!B3": "Nilai pasar", "LK Tanah!C3": "595.400.000",
     }
     docx, _ = blok_sumber("Proposal.docx", _docx("Pemberi tugas: PT ABC"))
     assert docx["text"] == "# Dokumen Word: Proposal.docx\n\nPemberi tugas: PT ABC"
@@ -108,6 +114,8 @@ def test_analisis_dokumen_nilai_lembar_kerja_dari_sel_asli():
             "kandidat": [
                 # AI salah menyalin angka lembar kerja → harus dikoreksi dari sel
                 {"sumber": "LK.xlsx", "lokasi": "LK Tanah!C2", "nilai": "321"},
+                # Angka sama dengan sel → tulisan berformat Claude dipertahankan
+                {"sumber": "LK.xlsx", "lokasi": "LK Tanah!C3", "nilai": "595.400.000"},
                 {"sumber": "SHM.pdf", "lokasi": "hal. 1", "nilai": "312"},
             ],
             "rekomendasi": "SHM.pdf",
@@ -141,6 +149,7 @@ def test_analisis_dokumen_nilai_lembar_kerja_dari_sel_asli():
     )
     assert temuan[0].kandidat == [
         Kandidat("LK.xlsx", "LK Tanah!C2", "312"),
+        Kandidat("LK.xlsx", "LK Tanah!C3", "595.400.000"),
         Kandidat("SHM.pdf", "hal. 1", "312"),
     ]
     assert temuan[0].kemunculan == [Kemunculan(0, "250", "angka", "Bab 2.docx")]

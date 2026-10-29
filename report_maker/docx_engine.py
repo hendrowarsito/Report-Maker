@@ -1,9 +1,13 @@
 """Pengisian placeholder dan Find & Replace di dokumen Word (.docx)."""
 import re
+import zipfile
 from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
 
 from docx import Document
+from docx.opc.constants import RELATIONSHIP_TYPE as RT
+from docx.text.paragraph import Paragraph
 
 
 # =============================================================================
@@ -24,6 +28,7 @@ from docx import Document
 #
 _W_NS  = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 _W_T   = f"{{{_W_NS}}}t"
+_W_P   = f"{{{_W_NS}}}p"
 _XML_SPACE = "{http://www.w3.org/XML/1998/namespace}space"
 
 
@@ -120,28 +125,29 @@ def replace_placeholders_in_paragraph(para, data: dict):
 # Document-level replacement (body + tabel tersarang + header + footer)
 # =============================================================================
 
-def _iter_table_paragraphs(tables):
-    for table in tables:
-        for row in table.rows:
-            for cell in row.cells:
-                yield from cell.paragraphs
-                yield from _iter_table_paragraphs(cell.tables)
+def _nomor_rid(rid: str) -> int:
+    return int(re.sub(r"\D", "", rid) or 0)
 
 
 def iter_all_paragraphs(doc: Document):
-    """Semua paragraf dokumen: body, tabel tersarang, header, dan footer."""
-    yield from doc.paragraphs
-    yield from _iter_table_paragraphs(doc.tables)
+    """
+    Semua paragraf dokumen: body (termasuk tabel tersarang dan kotak teks),
+    lalu setiap header/footer yang BENAR-BENAR ada di file.
 
-    for section in doc.sections:
-        for hf in (
-            section.header, section.footer,
-            section.even_page_header, section.even_page_footer,
-            section.first_page_header, section.first_page_footer,
-        ):
-            if hf is not None:
-                yield from hf.paragraphs
-                yield from _iter_table_paragraphs(hf.tables)
+    Header/footer dibaca langsung dari bagiannya, bukan lewat section.header:
+    python-docx membuat header/footer kosong baru untuk section yang "Link to
+    Previous", sehingga kop/footer halaman itu hilang di hasil.
+    """
+    for p in doc.element.body.iter(_W_P):
+        yield Paragraph(p, doc._body)
+
+    rels = sorted(doc.part.rels.values(), key=lambda r: _nomor_rid(r.rId))
+    for rel in rels:
+        if rel.reltype in (RT.HEADER, RT.FOOTER) and not rel.is_external:
+            bagian = rel.target_part
+            induk = SimpleNamespace(part=bagian)
+            for p in bagian.element.iter(_W_P):
+                yield Paragraph(p, induk)
 
 
 def replace_placeholders(doc: Document, data: dict) -> Document:
@@ -272,3 +278,32 @@ def konteks_placeholder(docx_bytes: bytes, lebar: int = 200) -> dict[str, str]:
                 m.group(1), teks[max(0, m.start() - lebar): m.end() + lebar].strip()
             )
     return hasil
+
+
+def bandingkan_format(asli: bytes, hasil: bytes) -> list[str]:
+    """
+    Pastikan hanya isi teks yang berubah. Bandingkan setiap bagian .docx setelah
+    teks di semua <w:t> dikosongkan: gaya, tabel, header/footer, gambar, dan
+    penomoran harus identik. Kembalikan nama bagian yang berbeda (kosong = utuh).
+    """
+    from lxml import etree
+
+    def _kerangka(data: bytes, nama: str) -> bytes:
+        if not nama.endswith(".xml") and not nama.endswith(".rels"):
+            return data
+        try:
+            root = etree.fromstring(data)
+        except etree.XMLSyntaxError:
+            return data
+        for t in root.iter(_W_T):
+            t.text = None
+            t.attrib.pop(_XML_SPACE, None)
+        return etree.tostring(root, method="c14n")
+
+    za = zipfile.ZipFile(BytesIO(asli))
+    zb = zipfile.ZipFile(BytesIO(hasil))
+    beda = sorted(set(za.namelist()) ^ set(zb.namelist()))
+    for nama in sorted(set(za.namelist()) & set(zb.namelist())):
+        if _kerangka(za.read(nama), nama) != _kerangka(zb.read(nama), nama):
+            beda.append(nama)
+    return beda

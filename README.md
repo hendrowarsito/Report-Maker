@@ -42,6 +42,12 @@ Catatan:
 - Format angka mengikuti template: `1.000.000,00`, `1.000.000`, atau `250`.
   Nomor seperti nomor sertifikat ditulis apa adanya.
 - Hanya teks yang diganti yang berubah; format huruf di sekitarnya tetap.
+  Di langkah Unduh, setiap file hasil **diverifikasi** terhadap templatenya:
+  gaya, tabel, header/footer, gambar, dan penomoran harus identik — hanya isi
+  teks yang boleh berbeda ("✅ Format template utuh").
+- Angka dari Excel diberi titik ribuan (595400000 → 595.400.000) bila
+  ≥ 10.000. Angka kecil (tahun, luas 416) dan data bernama nomor/kode
+  (`kode_pos`, `nib`, `nomor_…`, `tahun_…`, `rt`, `rw`) ditulis apa adanya.
 - Analisis berjalan di **latar belakang server** dengan tampilan kemajuan:
   aman ditinggal pindah aplikasi atau layar mati. Sesi (file, hasil, pilihan
   di tabel) dipertahankan 2 jam setelah koneksi terputus

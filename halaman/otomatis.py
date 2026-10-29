@@ -23,7 +23,7 @@ from report_maker import pekerjaan
 from report_maker.ai import get_client
 from report_maker.analisis import Temuan, analisis_dokumen, rencana_perubahan
 from report_maker.checks import check_value_consistency_table
-from report_maker.docx_engine import isi_dokumen
+from report_maker.docx_engine import bandingkan_format, isi_dokumen
 from report_maker.pdf import docx_ke_pdf, pdf_tersedia
 from report_maker.penyesuaian import daftar_paragraf, terapkan_penyesuaian, validasi_usulan
 
@@ -125,8 +125,11 @@ st.caption(
     "mengambil nilainya dari setiap sumber, dan mengecek apakah sumber-sumber itu sama."
 )
 
+# VERSI_ANALISIS dinaikkan bila penomoran paragraf/format hasil berubah, agar hasil
+# lama yang tersimpan di server tidak dipakai ulang
+VERSI_ANALISIS = b"2"
 kunci = hashlib.md5(
-    b"".join(n.encode() + b for n, b in [*template_bytes.items(), *sumber])
+    VERSI_ANALISIS + b"".join(n.encode() + b for n, b in [*template_bytes.items(), *sumber])
 ).hexdigest()
 kunci_analisis = f"analisis_{kunci}"
 
@@ -383,6 +386,19 @@ if masalah:
     st.warning("Periksa sebelum dikirim:\n" + "\n".join(f"- {m}" for m in masalah))
 else:
     st.success(f"Laporan siap — {jumlah} penggantian di {len(hasil)} file.")
+
+# Bukti format tidak berubah: hanya isi teks yang boleh berbeda dari template
+format_berubah = {
+    nama: bagian for nama, isi in hasil.items()
+    if (bagian := bandingkan_format(template_bytes[nama], isi))
+}
+if format_berubah:
+    st.error(
+        "Format berubah di luar isi teks — jangan kirim sebelum diperiksa:\n"
+        + "\n".join(f"- **{n}**: {', '.join(b)}" for n, b in format_berubah.items())
+    )
+else:
+    st.caption("✅ Format template utuh — diverifikasi: hanya isi teks yang berubah.")
 
 nama_hasil = {nama: f"{Path(nama).stem}_terisi" for nama in nama_template}
 buat_pdf = pdf_tersedia() and st.toggle("Sertakan PDF")

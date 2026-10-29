@@ -26,6 +26,7 @@ from .terbilang import (
     angka_ke_terbilang,
     angka_ke_terbilang_title,
     format_angka_indonesia,
+    format_ribuan,
     parse_ke_int,
 )
 
@@ -221,9 +222,11 @@ def analisis_dokumen(
         kandidat = []
         for k in t["kandidat"]:
             nilai = k["nilai"]
-            # Lembar kerja: percayai isi sel, bukan salinan AI
+            # Lembar kerja: percayai isi sel, bukan salinan AI. Bila angkanya sama,
+            # pertahankan tulisan Claude yang sudah berformat (mis. 595.400.000).
             if (sel := sel_per_file.get(k["sumber"])) and k["lokasi"] in sel:
-                nilai = sel[k["lokasi"]]
+                if _digit(sel[k["lokasi"]]) != _digit(nilai) or not _digit(nilai):
+                    nilai = sel[k["lokasi"]]
             kandidat.append(Kandidat(k["sumber"], k["lokasi"], nilai))
         temuan.append(Temuan(
             nama=t["nama"],
@@ -239,6 +242,10 @@ def analisis_dokumen(
 # =============================================================================
 # Dari pilihan penilai ke perubahan laporan
 # =============================================================================
+
+def _digit(teks: str) -> str:
+    return re.sub(r"\D", "", teks)
+
 
 def teks_pengganti(kemunculan: Kemunculan, nilai: str) -> str | None:
     """
@@ -258,8 +265,9 @@ def teks_pengganti(kemunculan: Kemunculan, nilai: str) -> str | None:
     lama = kemunculan.teks_lama.strip()
     if re.search(r",\d{2}$", lama):
         return format_angka_indonesia(angka)
-    if re.search(r"\d\.\d{3}", lama):
-        return f"{angka:,}".replace(",", ".")
+    # Template bertitik ribuan, atau placeholder (tanpa contoh format): beri titik ribuan
+    if re.search(r"\d\.\d{3}", lama) or "{{" in lama:
+        return format_ribuan(angka)
     # Tanpa pemisah ribuan (mis. luas, nomor): angka apa adanya, nol di depan tetap
     return nilai.strip() if nilai.strip().isdigit() else str(angka)
 
