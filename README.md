@@ -11,15 +11,44 @@ pip install -r requirements.txt
 streamlit run CreateLP5.py
 ```
 
-Aplikasi terbuka di `http://localhost:8501`. Alurnya empat langkah:
+Aplikasi terbuka di `http://localhost:8501` dengan dua halaman (menu di atas).
 
-1. **Upload** — template Word (boleh lebih dari satu) dan data Excel.
-2. **Periksa** — tabel kelengkapan placeholder, cek nominal vs terbilang,
-   preview isi, dan (opsional) review dengan AI.
-3. **Sesuaikan dengan AI** (opsional) — Claude membandingkan laporan dengan
-   dokumen sumber dan mengusulkan perubahan kalimat tanpa placeholder.
-4. **Unduh** — Word, dan PDF bila LibreOffice tersedia. Bila masih ada
-   masalah, unduhan perlu dikonfirmasi dulu.
+## Laporan otomatis (halaman utama) — tanpa placeholder
+
+1. **Upload** template laporan (.docx), lembar kerja penilaian (.xlsx), dan
+   dokumen pendukung — sertifikat tanah, IMB/PBG, proposal (.pdf / .docx).
+2. Klik **Analisis dokumen**. Claude membaca template dan menemukan sendiri
+   data objek yang harus diisi/diganti (pemberi tugas, alamat, sertifikat,
+   NIB, pemegang hak, luas, IMB, nilai, tanggal, dll.) — baik berupa
+   placeholder `{{...}}` maupun data dari laporan lama.
+3. Untuk setiap data, Claude mengambil nilainya dari **setiap** sumber dan
+   menyarankan sumber yang paling berwenang (data tanah → sertifikat,
+   bangunan → IMB, penugasan → proposal, angka penilaian → lembar kerja).
+4. Konsistensi antarsumber dicek: data yang **berbeda** (mis. luas di lembar
+   kerja 312 m², di sertifikat 315 m²) tampil paling atas dengan ⚠️.
+5. Periksa tabel temuan. Kolom **Gunakan** berisi sumber yang disarankan —
+   ganti bila perlu, pilih *Isi manual*, atau *Jangan ubah*. Rincian setiap
+   penggantian (paragraf, teks lama → teks baru) bisa dilihat sebelum unduh.
+6. **Unduh** laporan (.docx, dan PDF bila LibreOffice tersedia). Placeholder
+   yang tersisa dan nominal yang tidak sesuai terbilang diperingatkan.
+
+Catatan:
+- Nilai dari lembar kerja selalu dibaca dari **sel aslinya**, bukan salinan
+  AI. Terbilang dihitung aplikasi dari angka terpilih, bukan ditulis AI.
+- Format angka mengikuti template: `1.000.000,00`, `1.000.000`, atau `250`.
+  Nomor seperti nomor sertifikat ditulis apa adanya.
+- Hanya teks yang diganti yang berubah; format huruf di sekitarnya tetap.
+- Satu analisis memakai `claude-opus-5-5`; perkiraan biaya kasar
+  US$0,30–1 per laporan tergantung jumlah halaman sumber. Total PDF maksimal
+  30 MB.
+- Isi dokumen dikirim ke API Anthropic; pastikan sesuai kebijakan
+  kerahasiaan data klien.
+
+## Mode placeholder (halaman kedua)
+
+Alur sebelumnya, untuk template berisi placeholder `{{...}}`: Upload →
+Periksa → Sesuaikan dengan AI → Unduh. Penjelasan di bawah berlaku untuk
+halaman ini.
 
 ## Sumber data: dua cara
 
@@ -137,7 +166,9 @@ Hapus `packages.txt` bila PDF tidak diperlukan — instalasinya cukup besar.
 ## Struktur kode
 
 ```
-CreateLP5.py               UI Streamlit (tanpa logika inti)
+CreateLP5.py               titik masuk: header, navigasi halaman
+halaman/otomatis.py        halaman Laporan otomatis (tanpa placeholder)
+halaman/placeholder.py     halaman Mode placeholder (alur lama)
 report_maker/
   terbilang.py             terbilang, format angka/tanggal, placeholder turunan
   docx_engine.py           pengisian placeholder & Find & Replace di .docx
@@ -145,6 +176,7 @@ report_maker/
   ai.py                    review dokumen dengan Claude
   penyesuaian.py           usulan perubahan kalimat dari dokumen sumber (PDF/Excel)
   lembar_kerja.py          baca sel lembar kerja & pemetaan placeholder → sel
+  analisis.py              analisis template + sumber, cek konsistensi antarsumber
   pdf.py                   konversi .docx → PDF lewat LibreOffice
 assets/logo_srr.png        logo di header dan ikon tab
 .streamlit/config.toml     tema warna SRR
