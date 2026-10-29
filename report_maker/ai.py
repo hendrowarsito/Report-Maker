@@ -1,0 +1,56 @@
+"""Review dokumen dengan Claude (opsional, butuh API key)."""
+import anthropic
+
+MODEL_REVIEW = "claude-sonnet-4-6"
+
+
+# =============================================================================
+# Claude API — review dokumen
+# =============================================================================
+
+def get_client(api_key: str) -> anthropic.Anthropic:
+    return anthropic.Anthropic(api_key=api_key)
+
+
+def review_document_ai(
+    doc_text: str,
+    client: anthropic.Anthropic,
+    find_replace_pairs: list[tuple[str, str]] | None = None,
+) -> str:
+    """
+    Review QA lengkap dokumen yang sudah terisi via Claude Sonnet (streaming).
+    Cek: placeholder belum terisi, inkonsistensi nilai/tanggal, bagian kosong,
+    dan — bila ada — apakah hasil Find & Replace tepat sesuai konteks kalimat.
+    """
+    cek_fr = ""
+    if find_replace_pairs:
+        daftar = "\n".join(f'   - "{f}" → "{r}"' for f, r in find_replace_pairs)
+        cek_fr = (
+            "6. **Find & Replace** — penggantian kata berikut sudah diterapkan. "
+            "Sebutkan kemunculan kata pengganti yang konteksnya keliru:\n"
+            f"{daftar}\n"
+        )
+
+    with client.messages.stream(
+        model=MODEL_REVIEW,
+        max_tokens=2000,
+        messages=[
+            {
+                "role": "user",
+                "content": (
+                    "Anda adalah auditor dokumen laporan penilaian aset/properti profesional Indonesia.\n\n"
+                    "Periksa dokumen berikut:\n"
+                    "1. **Placeholder belum terisi** — pola {{...}} atau [PLACEHOLDER:{{...}}]\n"
+                    "2. **Inkonsistensi nilai** — nominal angka yang sama berbeda di bagian lain\n"
+                    "3. **Inkonsistensi tanggal** — tanggal tidak konsisten atau tidak logis\n"
+                    "4. **Bagian kosong** — paragraf tidak lengkap\n"
+                    "5. **Anomali data** — nilai tidak wajar, nama tidak konsisten\n"
+                    f"{cek_fr}\n"
+                    f"Dokumen:\n---\n{doc_text[:10000]}\n---\n\n"
+                    "Laporan audit dalam markdown terstruktur. "
+                    "Mulai dengan baris status: ✅ LULUS / ⚠️ PERLU REVIEW / ❌ KRITIS"
+                ),
+            }
+        ],
+    ) as stream:
+        return stream.get_final_text()

@@ -1,0 +1,10 @@
+[theme]
+# Ungu logo SRR
+primaryColor = "#312266"
+
+[client]
+# Sembunyikan menu developer (Deploy, Rerun, dsb.) dari pengguna
+toolbarMode = "minimal"
+
+[browser]
+gatherUsageStats = false
