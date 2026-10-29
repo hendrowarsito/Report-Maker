@@ -11,12 +11,14 @@ pip install -r requirements.txt
 streamlit run CreateLP5.py
 ```
 
-Aplikasi terbuka di `http://localhost:8501`. Alurnya tiga langkah:
+Aplikasi terbuka di `http://localhost:8501`. Alurnya empat langkah:
 
 1. **Upload** — template Word (boleh lebih dari satu) dan data Excel.
 2. **Periksa** — tabel kelengkapan placeholder, cek nominal vs terbilang,
    preview isi, dan (opsional) review dengan AI.
-3. **Unduh** — Word, dan PDF bila LibreOffice tersedia. Bila masih ada
+3. **Sesuaikan dengan AI** (opsional) — Claude membandingkan laporan dengan
+   dokumen sumber dan mengusulkan perubahan kalimat tanpa placeholder.
+4. **Unduh** — Word, dan PDF bila LibreOffice tersedia. Bila masih ada
    masalah, unduhan perlu dikonfirmasi dulu.
 
 ## Format Excel
@@ -75,6 +77,28 @@ ANTHROPIC_API_KEY = "sk-ant-..."
 Variabel lingkungan `ANTHROPIC_API_KEY` juga dibaca. Di Streamlit Community
 Cloud, isi lewat **App settings → Secrets**.
 
+### Sesuaikan dengan AI (tanpa placeholder)
+
+Upload dokumen sumber — PDF (sertifikat, IMB/PBG, dsb.) dan Excel (lembar
+kerja penilaian) — lalu klik **Cari ketidaksesuaian**. Claude membaca sumber
+dan laporan yang sudah terisi, lalu mengusulkan penggantian kalimat yang
+bertentangan dengan sumber (nomor sertifikat, luas, pemegang hak, alamat,
+tanggal, nilai beserta terbilangnya, dll.).
+
+- Setiap usulan menyebut **sumber** (file + halaman / sheet + sel) dan
+  **kutipan** teksnya, agar mudah dicocokkan.
+- Tidak ada yang berubah sebelum disetujui: hapus centang untuk menolak, atau
+  ubah kolom *Usulan baru*. Usulan yang dicentang langsung dipakai di file
+  unduhan dan dokumennya diperiksa ulang.
+- Hanya teks yang diganti yang berubah — format huruf di sekitarnya tetap.
+- Memakai model `claude-opus-5-5` (`report_maker/penyesuaian.py`,
+  `MODEL_PENYESUAIAN`). Perkiraan biaya kasar US$0,30–0,60 per laporan;
+  analisis ulang dengan sumber yang sama lebih murah karena sumber di-cache.
+- Total PDF maksimal 30 MB per analisis. Nilai rumus Excel dibaca dari hasil
+  terakhir yang disimpan Excel — simpan file di Excel sebelum di-upload.
+- Isi dokumen sumber dikirim ke API Anthropic; pastikan sesuai kebijakan
+  kerahasiaan data klien.
+
 ### Ekspor PDF
 
 Butuh LibreOffice di server. `packages.txt` sudah berisi paket yang
@@ -92,6 +116,7 @@ report_maker/
   docx_engine.py           pengisian placeholder & Find & Replace di .docx
   checks.py                kelengkapan data, nominal vs terbilang, deteksi baris awal
   ai.py                    review dokumen dengan Claude
+  penyesuaian.py           usulan perubahan kalimat dari dokumen sumber (PDF/Excel)
   pdf.py                   konversi .docx → PDF lewat LibreOffice
 assets/logo_srr.png        logo di header dan ikon tab
 .streamlit/config.toml     tema warna SRR

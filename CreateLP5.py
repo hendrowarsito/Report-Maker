@@ -5,6 +5,7 @@ import zipfile
 from io import BytesIO
 from pathlib import Path
 
+import anthropic
 import pandas as pd
 import streamlit as st
 
@@ -21,6 +22,14 @@ from report_maker.docx_engine import (
     placeholders_dari_bytes,
 )
 from report_maker.pdf import docx_ke_pdf, pdf_tersedia
+from report_maker.penyesuaian import (
+    Usulan,
+    daftar_paragraf,
+    excel_ke_teks,
+    terapkan_penyesuaian,
+    usulkan_penyesuaian,
+    validasi_usulan,
+)
 from report_maker.terbilang import format_nilai, generate_auto_terbilang, pecah_turunan
 
 MIME_DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -67,6 +76,16 @@ def _isi(docx_bytes: bytes, data: dict, pairs: tuple) -> tuple[bytes, str, list[
 @st.cache_data(show_spinner=False, max_entries=50)
 def _pdf(docx_bytes: bytes) -> bytes:
     return docx_ke_pdf(docx_bytes)
+
+
+@st.cache_data(show_spinner=False, max_entries=20)
+def _paragraf(docx_bytes: bytes) -> dict[int, str]:
+    return daftar_paragraf(docx_bytes)
+
+
+@st.cache_data(show_spinner=False, max_entries=20)
+def _excel_teks(xlsx_bytes: bytes) -> str:
+    return excel_ke_teks(xlsx_bytes)
 
 
 def _api_key_tersimpan() -> str:
@@ -335,10 +354,137 @@ for tab, (nama_template, isi_template) in zip(tabs, template_bytes.items()):
 
 
 # ---------------------------------------------------------------------------
-# ③ Unduh
+# ③ Sesuaikan dengan AI — tanpa placeholder, dari dokumen sumber
 # ---------------------------------------------------------------------------
 st.divider()
-st.subheader("③ Unduh")
+st.subheader("③ Sesuaikan dengan AI")
+st.caption(
+    "Opsional. Claude membandingkan laporan dengan sertifikat (PDF) dan lembar kerja "
+    "(Excel), lalu mengusulkan perubahan kalimat yang tidak sesuai — tanpa placeholder. "
+    "Tidak ada yang diubah sebelum Anda setujui."
+)
+
+BATAS_PDF_MB = 30  # batas satu permintaan API 32 MB, sisakan ruang untuk teks
+
+if not claude_ready:
+    st.caption("Isi API key di Pengaturan untuk memakai fitur ini.")
+else:
+    sumber_files = st.file_uploader(
+        "Dokumen sumber (PDF sertifikat, Excel lembar kerja)",
+        type=["pdf", "xlsx"],
+        accept_multiple_files=True,
+        key="dokumen_sumber",
+    )
+    pdfs = [(f.name, f.getvalue()) for f in sumber_files if f.name.lower().endswith(".pdf")]
+    excels = [
+        (f.name, _excel_teks(f.getvalue()))
+        for f in sumber_files if f.name.lower().endswith(".xlsx")
+    ]
+    ukuran_pdf_mb = sum(len(isi) for _, isi in pdfs) / 1_000_000
+    sidik_sumber = hashlib.md5(
+        b"".join(f.name.encode() + f.getvalue() for f in sumber_files)
+    ).hexdigest()
+
+    if not sumber_files:
+        st.info("Upload dokumen sumber untuk mulai.")
+    elif ukuran_pdf_mb > BATAS_PDF_MB:
+        st.error(
+            f"Total PDF {ukuran_pdf_mb:.1f} MB melebihi batas {BATAS_PDF_MB} MB. "
+            "Kurangi jumlah file atau perkecil ukuran scan."
+        )
+    else:
+        tabs_ai = st.tabs([nama for nama, _ in processed_files])
+        for idx, (tab, (nama_template, output_bytes)) in enumerate(zip(tabs_ai, processed_files)):
+            paragraf = _paragraf(output_bytes)
+            kunci = hashlib.md5(output_bytes + sidik_sumber.encode()).hexdigest()
+            kunci_usulan = f"usulan_{kunci}"
+
+            with tab:
+                st.caption(
+                    f"{len(paragraf)} paragraf laporan · {len(pdfs)} PDF · "
+                    f"{len(excels)} Excel"
+                )
+                if st.button("Cari ketidaksesuaian", key=f"cari_{kunci}", type="primary"):
+                    try:
+                        with st.spinner("Claude sedang membaca dokumen sumber dan laporan..."):
+                            usulan, catatan = usulkan_penyesuaian(
+                                get_client(api_key), paragraf, pdfs, excels
+                            )
+                        st.session_state[kunci_usulan] = (
+                            *validasi_usulan(paragraf, usulan), catatan
+                        )
+                    except (anthropic.APIError, RuntimeError, ValueError) as e:
+                        st.error(f"Gagal mendapatkan usulan: {e}")
+
+                if kunci_usulan not in st.session_state:
+                    continue
+                valid, tidak_valid, catatan = st.session_state[kunci_usulan]
+
+                if catatan:
+                    st.info(f"**Catatan Claude:** {catatan}")
+                if not valid:
+                    st.success("Tidak ada ketidaksesuaian yang ditemukan.")
+                    continue
+
+                st.markdown(
+                    f"**{len(valid)} usulan perubahan** — hapus centang untuk menolak, "
+                    "atau ubah kolom *Usulan baru* sebelum diterapkan."
+                )
+                df_usulan = st.data_editor(
+                    pd.DataFrame({
+                        "Terapkan":       [True] * len(valid),
+                        "Paragraf":       [u.paragraf for u in valid],
+                        "Kalimat lama":   [u.teks_lama for u in valid],
+                        "Usulan baru":    [u.teks_baru for u in valid],
+                        "Alasan":         [u.alasan for u in valid],
+                        "Sumber":         [u.sumber for u in valid],
+                        "Kutipan sumber": [u.kutipan_sumber for u in valid],
+                    }),
+                    disabled=["Paragraf", "Kalimat lama", "Alasan", "Sumber", "Kutipan sumber"],
+                    hide_index=True,
+                    width="stretch",
+                    key=f"editor_{kunci}",
+                )
+                if tidak_valid:
+                    with st.expander(f"{len(tidak_valid)} usulan tidak dapat diterapkan"):
+                        for u, alasan in tidak_valid:
+                            st.markdown(f"- [{u.paragraf}] “{u.teks_lama}” → “{u.teks_baru}” — *{alasan}*")
+
+                disetujui = [
+                    Usulan(
+                        paragraf=u.paragraf, teks_lama=u.teks_lama,
+                        teks_baru="" if pd.isna(baru) else str(baru),
+                        alasan=u.alasan, sumber=u.sumber, kutipan_sumber=u.kutipan_sumber,
+                    )
+                    for u, pakai, baru in zip(valid, df_usulan["Terapkan"], df_usulan["Usulan baru"])
+                    if pakai
+                ]
+                if not disetujui:
+                    continue
+
+                # Usulan yang disetujui langsung dipakai untuk file unduhan,
+                # lalu dokumen hasilnya diperiksa ulang.
+                hasil_ai, jumlah = terapkan_penyesuaian(output_bytes, disetujui)
+                processed_files[idx] = (nama_template, hasil_ai)
+                _, teks_ai, sisa_ai = _isi(hasil_ai, {}, ())
+                salah_ai = check_value_consistency_table(teks_ai)["Status"].str.startswith("❌").sum()
+                masalah = []
+                if sisa_ai:
+                    masalah.append(f"{len(sisa_ai)} placeholder belum terganti")
+                if salah_ai:
+                    masalah.append(f"{salah_ai} nominal tidak sesuai terbilang")
+                masalah_per_file[nama_template] = masalah
+
+                st.success(f"{len(disetujui)} usulan disetujui ({jumlah} penggantian) — ikut di file unduhan.")
+                if salah_ai:
+                    st.warning("Setelah perubahan, masih ada nominal yang tidak sesuai terbilang.")
+
+
+# ---------------------------------------------------------------------------
+# ④ Unduh
+# ---------------------------------------------------------------------------
+st.divider()
+st.subheader("④ Unduh")
 
 ada_masalah = {nama: m for nama, m in masalah_per_file.items() if m}
 if ada_masalah:
