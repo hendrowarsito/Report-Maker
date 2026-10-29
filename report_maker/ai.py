@@ -1,4 +1,6 @@
 """Review dokumen dengan Claude (opsional, butuh API key)."""
+import json
+
 import anthropic
 
 MODEL_REVIEW = "claude-sonnet-4-6"
@@ -8,8 +10,41 @@ MODEL_REVIEW = "claude-sonnet-4-6"
 # Claude API — review dokumen
 # =============================================================================
 
+MODEL_ANALISIS = "claude-opus-5-5"
+
+
 def get_client(api_key: str) -> anthropic.Anthropic:
     return anthropic.Anthropic(api_key=api_key)
+
+
+def minta_json(
+    client: anthropic.Anthropic, system: str, konten: list[dict], skema: dict
+) -> dict:
+    """
+    Satu permintaan ke Claude dengan jawaban JSON sesuai skema.
+    RuntimeError bila permintaan ditolak atau jawabannya terpotong.
+    """
+    with client.beta.messages.stream(
+        model=MODEL_ANALISIS,
+        max_tokens=64000,
+        system=system,
+        messages=[{"role": "user", "content": konten}],
+        output_config={
+            "effort": "high",
+            "format": {"type": "json_schema", "schema": skema},
+        },
+        # Bila ditolak filter keamanan, ulangi otomatis di model cadangan Anthropic
+        betas=["server-side-fallback-2026-07-01"],
+        fallbacks="default",
+    ) as stream:
+        respons = stream.get_final_message()
+
+    if respons.stop_reason == "refusal":
+        raise RuntimeError("Permintaan ditolak oleh Claude. Coba lagi atau periksa dokumen sumber.")
+    if respons.stop_reason == "max_tokens":
+        raise RuntimeError("Jawaban Claude terpotong. Coba dengan dokumen yang lebih sedikit.")
+
+    return json.loads(next(b.text for b in respons.content if b.type == "text"))
 
 
 def review_document_ai(

@@ -21,9 +21,36 @@ Aplikasi terbuka di `http://localhost:8501`. Alurnya empat langkah:
 4. **Unduh** — Word, dan PDF bila LibreOffice tersedia. Bila masih ada
    masalah, unduhan perlu dikonfirmasi dulu.
 
-## Format Excel
+## Sumber data: dua cara
 
-Data dibaca dari dua kolom pertama sheet yang dipilih:
+### 1. Baca langsung dari lembar kerja (tanpa sheet Laporan)
+
+Upload lembar kerja penilaian apa adanya. Untuk setiap placeholder di template,
+Claude mencarikan sel yang tepat di sheet mana pun — misalnya `{{alamat_objek}}`
+→ `LK Tanah!C5` — dengan memahami nama placeholder dan kalimat tempat ia dipakai.
+
+- Klik **Petakan … data dengan AI**. Nilai selalu **dibaca dari sel**, bukan
+  ditulis ulang oleh AI, jadi angka tidak mungkin dikarang.
+- Hasil pemetaan tampil di tabel **Pemetaan data → sel lembar kerja**: kolom
+  *Sel* bisa dikoreksi (`Nama Sheet!C5`, beberapa sel dipisah `;` dan
+  digabung dengan *Pemisah*). Hapus baris agar dipetakan ulang.
+- Pemetaan berkeyakinan rendah, sel kosong, atau data yang tidak ditemukan
+  ditandai ⚠️ di Kelengkapan Data.
+- **Simpan pemetaan (.json)** lalu upload di **Pengaturan → Pemetaan
+  tersimpan** untuk laporan berikutnya dengan format lembar kerja yang sama:
+  langsung terisi, tanpa AI dan tanpa biaya. Hanya placeholder baru yang
+  perlu dipetakan AI.
+- Angka mengikuti format sel di Excel: `#,##0` → `1.250.000.000`, persen →
+  `12,5%`, tanggal → `1 Oktober 2026`.
+- Nilai rumus dibaca dari hasil terakhir yang disimpan Excel — buka dan simpan
+  file di Excel sebelum di-upload.
+- Beri placeholder nama yang menjelaskan isinya (`{{luas_tanah}}`,
+  `{{nilai_pasar}}`), agar AI memetakannya dengan tepat.
+
+### 2. Sheet berisi key | nilai (cara lama)
+
+Dipilih otomatis bila file punya sheet bernama `Laporan`. Data dibaca dari dua
+kolom pertama sheet yang dipilih:
 
 | A (key)        | B (nilai)        |
 |----------------|------------------|
@@ -40,7 +67,7 @@ Data dibaca dari dua kolom pertama sheet yang dipilih:
 
 ## Placeholder di template Word
 
-Tulis key dari kolom A sebagai `{{key}}`. Placeholder boleh berada di body,
+Tulis placeholder sebagai `{{nama}}`. Placeholder boleh berada di body,
 tabel, header, footer, atau hyperlink, dan formatnya (tebal, miring, font)
 tetap terjaga.
 
@@ -117,6 +144,7 @@ report_maker/
   checks.py                kelengkapan data, nominal vs terbilang, deteksi baris awal
   ai.py                    review dokumen dengan Claude
   penyesuaian.py           usulan perubahan kalimat dari dokumen sumber (PDF/Excel)
+  lembar_kerja.py          baca sel lembar kerja & pemetaan placeholder → sel
   pdf.py                   konversi .docx → PDF lewat LibreOffice
 assets/logo_srr.png        logo di header dan ikon tab
 .streamlit/config.toml     tema warna SRR

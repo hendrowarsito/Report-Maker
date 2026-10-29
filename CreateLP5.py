@@ -17,9 +17,20 @@ from report_maker.checks import (
 )
 from report_maker.docx_engine import (
     highlight_placeholders,
+    konteks_placeholder,
     isi_dokumen,
     nama_file_hasil,
     placeholders_dari_bytes,
+)
+from report_maker.lembar_kerja import (
+    KEYAKINAN,
+    Pemetaan,
+    baca_sel,
+    kebutuhan_kunci,
+    pemetaan_dari_json,
+    pemetaan_ke_json,
+    petakan_dengan_ai,
+    terapkan_pemetaan,
 )
 from report_maker.pdf import docx_ke_pdf, pdf_tersedia
 from report_maker.penyesuaian import (
@@ -88,6 +99,16 @@ def _excel_teks(xlsx_bytes: bytes) -> str:
     return excel_ke_teks(xlsx_bytes)
 
 
+@st.cache_data(show_spinner=False, max_entries=10)
+def _sel_lembar_kerja(xlsx_bytes: bytes) -> dict[str, str]:
+    return baca_sel(xlsx_bytes)
+
+
+@st.cache_data(show_spinner=False, max_entries=20)
+def _konteks(docx_bytes: bytes) -> dict[str, str]:
+    return konteks_placeholder(docx_bytes)
+
+
 def _api_key_tersimpan() -> str:
     """API key dari .streamlit/secrets.toml atau variabel lingkungan, bila ada."""
     try:
@@ -109,7 +130,10 @@ col_word, col_excel = st.columns(2)
 word_files = col_word.file_uploader(
     "Template Laporan (.docx)", type=["docx"], accept_multiple_files=True
 )
-excel_file = col_excel.file_uploader("Data Lembar Kerja (.xlsx)", type=["xlsx"])
+excel_file = col_excel.file_uploader("Lembar Kerja (.xlsx)", type=["xlsx"])
+
+MODE_PETA = "Baca langsung dari lembar kerja"
+MODE_SHEET = "Sheet berisi key | nilai"
 
 sheet_names: list[str] = []
 if excel_file:
@@ -121,26 +145,46 @@ if excel_file:
     finally:
         excel_file.seek(0)
 
+mode_data = st.radio(
+    "Sumber data",
+    [MODE_PETA, MODE_SHEET],
+    index=1 if "Laporan" in sheet_names else 0,
+    horizontal=True,
+    help=(
+        "**Baca langsung**: AI mencari sendiri sel yang cocok untuk tiap placeholder "
+        "di sheet mana pun (mis. alamat di sheet LK Tanah) — tidak perlu sheet Laporan.  \n"
+        "**Sheet key | nilai**: cara lama, satu sheet berisi nama key dan nilainya."
+    ),
+)
+
 with st.expander("Pengaturan"):
-    st.markdown("**Excel**")
-    c1, c2 = st.columns(2)
-    if sheet_names:
-        sheet_name = c1.selectbox(
-            "Sheet",
-            sheet_names,
-            index=sheet_names.index("Laporan") if "Laporan" in sheet_names else 0,
+    if mode_data == MODE_PETA:
+        st.markdown("**Pemetaan tersimpan** — pakai lagi pemetaan dari laporan sebelumnya.")
+        file_pemetaan = st.file_uploader(
+            "Pemetaan (.json)", type=["json"], label_visibility="collapsed"
         )
+        sheet_name, skiprows = None, None
     else:
-        sheet_name = None
-        c1.selectbox("Sheet", [], placeholder="Upload Excel dulu", disabled=True)
-    skiprows = c2.number_input(
-        "Lewati baris pertama",
-        min_value=0,
-        value=None,
-        step=1,
-        placeholder="Otomatis",
-        help="Kosongkan agar baris awal data dideteksi dari key yang dipakai template.",
-    )
+        file_pemetaan = None
+        st.markdown("**Excel**")
+        c1, c2 = st.columns(2)
+        if sheet_names:
+            sheet_name = c1.selectbox(
+                "Sheet",
+                sheet_names,
+                index=sheet_names.index("Laporan") if "Laporan" in sheet_names else 0,
+            )
+        else:
+            sheet_name = None
+            c1.selectbox("Sheet", [], placeholder="Upload Excel dulu", disabled=True)
+        skiprows = c2.number_input(
+            "Lewati baris pertama",
+            min_value=0,
+            value=None,
+            step=1,
+            placeholder="Otomatis",
+            help="Kosongkan agar baris awal data dideteksi dari key yang dipakai template.",
+        )
 
     st.markdown("**Nama file hasil**")
     pola_nama = st.text_input(
@@ -185,7 +229,11 @@ with st.expander("Pengaturan"):
 
 with st.expander("Panduan placeholder"):
     st.markdown(
-        "Tulis key dari kolom pertama Excel sebagai `{{key}}` di template Word. "
+        "Tulis placeholder sebagai `{{nama}}` di template Word. Pada mode "
+        "**Baca langsung dari lembar kerja**, beri nama yang menjelaskan isinya "
+        "(mis. `{{alamat_objek}}`, `{{luas_tanah}}`, `{{nilai_pasar}}`) — AI "
+        "mencarikan selnya di lembar kerja. Pada mode **Sheet key | nilai**, "
+        "nama = isi kolom pertama sheet. "
         "Untuk nominal, tambahkan akhiran agar terbilang dibuat otomatis. "
         "Contoh untuk key `NP_nominal` = 200000000:\n\n"
         "| Placeholder | Hasil |\n|---|---|\n"
@@ -197,71 +245,195 @@ with st.expander("Panduan placeholder"):
     st.caption("Key sumber diformat ribuan hanya bila salah satu akhiran dipakai.")
 
 if not (word_files and excel_file):
-    st.info("Upload template Word dan data Excel untuk melanjutkan.")
+    st.info("Upload template Word dan lembar kerja Excel untuk melanjutkan.")
     st.stop()
 
 
 # ---------------------------------------------------------------------------
-# Baca Excel & bangun data_dict
+# Pindai placeholder template
 # ---------------------------------------------------------------------------
-try:
-    df_excel = pd.read_excel(
-        excel_file, header=None, sheet_name=sheet_name, engine="openpyxl"
-    )
-except Exception as e:
-    st.error(f"Gagal membaca Excel: {e}")
-    st.stop()
-
-if df_excel.shape[1] < 2:
-    st.error(f"Sheet **{sheet_name}** harus punya minimal 2 kolom: key dan nilai.")
-    st.stop()
-
-# Format tanggal/angka sebelum ditampilkan, agar yang terlihat di tabel
-# sama persis dengan yang akan ditempel ke laporan.
-df_excel = df_excel.apply(lambda col: col.map(format_nilai))
-
-# Pindai placeholder template (dipakai juga untuk mendeteksi baris awal data)
 template_bytes = {wf.name: wf.getvalue() for wf in word_files}
 placeholders_per_file: dict[str, list[str]] = {}
 for nama, isi in template_bytes.items():
     for ph in _placeholders(isi):
         placeholders_per_file.setdefault(ph, []).append(nama)
 
-if skiprows is None:
-    baris_awal = deteksi_baris_awal(
-        df_excel.iloc[:, 0].tolist(),
-        df_excel.iloc[:, 1].tolist(),
-        set(placeholders_per_file),
-    )
-    sumber_baris = "terdeteksi otomatis"
-else:
-    baris_awal = int(skiprows)
-    sumber_baris = "diatur manual"
-df_excel = df_excel.iloc[baris_awal:].reset_index(drop=True)
-
-
-# ---------------------------------------------------------------------------
-# ② Periksa
-# ---------------------------------------------------------------------------
 st.divider()
 st.subheader("② Periksa")
 
-st.caption(
-    f"Data dibaca dari sheet **{sheet_name}** mulai baris ke-{baris_awal + 1} "
-    f"({sumber_baris}). Ubah di Pengaturan bila keliru."
-)
-with st.expander("Data Excel (bisa diedit)"):
-    df_editable = st.data_editor(df_excel, num_rows="dynamic", width="stretch")
+# Peringatan dari sumber data (mis. sel kosong) — ditampilkan di Kelengkapan Data
+peringatan_data: dict[str, str] = {}
 
-data_excel: dict[str, str] = {}
-for _, row in df_editable.iterrows():
-    key = format_nilai(row.iloc[0])
-    if key:
-        data_excel[key] = format_nilai(row.iloc[1])
+if mode_data == MODE_PETA:
+    # -----------------------------------------------------------------------
+    # Baca langsung dari lembar kerja: placeholder → sel (dipetakan AI)
+    # -----------------------------------------------------------------------
+    excel_bytes = excel_file.getvalue()
+    try:
+        sel = _sel_lembar_kerja(excel_bytes)
+    except Exception as e:
+        st.error(f"Gagal membaca lembar kerja: {e}")
+        st.stop()
+
+    kebutuhan = kebutuhan_kunci(set(placeholders_per_file))
+    peta: dict[str, Pemetaan] = st.session_state.setdefault("pemetaan", {})
+    st.session_state.setdefault("pemetaan_versi", 0)
+
+    # Pemetaan tersimpan di-upload: gabungkan sekali per file
+    if file_pemetaan is not None:
+        sidik = hashlib.md5(file_pemetaan.getvalue()).hexdigest()
+        if st.session_state.get("pemetaan_file") != sidik:
+            try:
+                peta.update(pemetaan_dari_json(file_pemetaan.getvalue()))
+                st.session_state["pemetaan_versi"] += 1
+            except ValueError as e:
+                st.error(str(e))
+            st.session_state["pemetaan_file"] = sidik
+
+    st.caption(
+        f"Lembar kerja: {len(sel)} sel berisi di {len({r.rsplit('!', 1)[0] for r in sel})} sheet · "
+        f"{len(kebutuhan)} data dibutuhkan template."
+    )
+
+    # Tabel pemetaan — bisa dikoreksi; baris dihapus agar dipetakan ulang AI
+    kunci_tampil = [k for k in kebutuhan if k in peta]
+    peta_edit: dict[str, Pemetaan] = {}
+    if kunci_tampil:
+        with st.expander("Pemetaan data → sel lembar kerja (bisa dikoreksi)"):
+            df_peta = st.data_editor(
+                pd.DataFrame({
+                    "Key":       kunci_tampil,
+                    "Sel":       ["; ".join(peta[k].sel) for k in kunci_tampil],
+                    "Pemisah":   [peta[k].pemisah for k in kunci_tampil],
+                    "Keyakinan": [peta[k].keyakinan for k in kunci_tampil],
+                    "Alasan":    [peta[k].alasan for k in kunci_tampil],
+                }),
+                column_config={
+                    "Sel": st.column_config.TextColumn(
+                        help="Format `Nama Sheet!C5`; beberapa sel dipisah `;`"
+                    ),
+                    "Keyakinan": st.column_config.SelectboxColumn(options=KEYAKINAN),
+                },
+                disabled=["Key", "Alasan"],
+                num_rows="delete",
+                hide_index=True,
+                width="stretch",
+                key=f"editor_pemetaan_{st.session_state['pemetaan_versi']}",
+            )
+            for _, r in df_peta.iterrows():
+                peta_edit[r["Key"]] = Pemetaan(
+                    sel=[x.strip() for x in str(r["Sel"] or "").split(";") if x.strip()],
+                    pemisah="" if pd.isna(r["Pemisah"]) else str(r["Pemisah"]),
+                    keyakinan=str(r["Keyakinan"]),
+                    alasan=str(r["Alasan"]),
+                )
+            c_simpan, c_hapus = st.columns(2)
+            if c_hapus.button(
+                "Kosongkan pemetaan",
+                help="Untuk lembar kerja dengan format lain — semua data dipetakan ulang.",
+            ):
+                st.session_state["pemetaan"] = {}
+                st.session_state.pop("pemetaan_catatan", None)
+                st.session_state["pemetaan_versi"] += 1
+                st.rerun()
+            c_simpan.download_button(
+                "Simpan pemetaan (.json)",
+                data=pemetaan_ke_json({**peta, **peta_edit}),
+                file_name="pemetaan_lembar_kerja.json",
+                mime="application/json",
+                help="Upload di Pengaturan untuk laporan berikutnya dengan format "
+                     "lembar kerja yang sama — tanpa AI, tanpa biaya.",
+            )
+
+    belum = [k for k in kebutuhan if k not in peta_edit]
+    if belum:
+        st.warning(
+            f"{len(belum)} data belum dipetakan ke lembar kerja: "
+            + ", ".join(f"`{k}`" for k in belum)
+        )
+        if not claude_ready:
+            st.caption(
+                "Isi API key di Pengaturan agar AI bisa mencarikan selnya, "
+                "atau upload pemetaan tersimpan."
+            )
+        elif st.button(f"Petakan {len(belum)} data dengan AI", type="primary"):
+            konteks: dict[str, str] = {}
+            for isi in template_bytes.values():
+                for ph, k in _konteks(isi).items():
+                    konteks.setdefault(ph, k)
+            try:
+                with st.spinner("Claude sedang membaca lembar kerja..."):
+                    hasil_peta, catatan_peta = petakan_dengan_ai(
+                        get_client(api_key), sel, {k: kebutuhan[k] for k in belum}, konteks
+                    )
+            except (anthropic.APIError, RuntimeError, ValueError) as e:
+                st.error(f"Gagal memetakan: {e}")
+            else:
+                # Simpan koreksi di tabel + hasil AI, lalu tampilkan ulang tabelnya
+                st.session_state["pemetaan"] = {**peta, **peta_edit, **hasil_peta}
+                st.session_state["pemetaan_catatan"] = catatan_peta
+                st.session_state["pemetaan_versi"] += 1
+                st.rerun()
+
+    if catatan_peta := st.session_state.get("pemetaan_catatan"):
+        st.info(f"**Catatan Claude:** {catatan_peta}")
+
+    data_excel, peringatan_data = terapkan_pemetaan(peta_edit, sel)
+
+else:
+    # -----------------------------------------------------------------------
+    # Cara lama: satu sheet berisi key | nilai
+    # -----------------------------------------------------------------------
+    try:
+        df_excel = pd.read_excel(
+            excel_file, header=None, sheet_name=sheet_name, engine="openpyxl"
+        )
+    except Exception as e:
+        st.error(f"Gagal membaca Excel: {e}")
+        st.stop()
+
+    if df_excel.shape[1] < 2:
+        st.error(f"Sheet **{sheet_name}** harus punya minimal 2 kolom: key dan nilai.")
+        st.stop()
+
+    # Format tanggal/angka sebelum ditampilkan, agar yang terlihat di tabel
+    # sama persis dengan yang akan ditempel ke laporan.
+    df_excel = df_excel.apply(lambda col: col.map(format_nilai))
+
+    if skiprows is None:
+        baris_awal = deteksi_baris_awal(
+            df_excel.iloc[:, 0].tolist(),
+            df_excel.iloc[:, 1].tolist(),
+            set(placeholders_per_file),
+        )
+        sumber_baris = "terdeteksi otomatis"
+    else:
+        baris_awal = int(skiprows)
+        sumber_baris = "diatur manual"
+    df_excel = df_excel.iloc[baris_awal:].reset_index(drop=True)
+
+    st.caption(
+        f"Data dibaca dari sheet **{sheet_name}** mulai baris ke-{baris_awal + 1} "
+        f"({sumber_baris}). Ubah di Pengaturan bila keliru."
+    )
+    with st.expander("Data Excel (bisa diedit)"):
+        df_editable = st.data_editor(df_excel, num_rows="dynamic", width="stretch")
+
+    data_excel = {}
+    for _, row in df_editable.iterrows():
+        key = format_nilai(row.iloc[0])
+        if key:
+            data_excel[key] = format_nilai(row.iloc[1])
 
 # Buat terbilang otomatis dari akhiran nama placeholder
 auto_tb, peringatan_tb = generate_auto_terbilang(data_excel, set(placeholders_per_file))
 data_dict = {**data_excel, **auto_tb}
+
+# Peringatan sel/key berlaku juga untuk placeholder turunannya ({{X_TERBILANG}})
+for ph in placeholders_per_file:
+    sumber = pecah_turunan(ph)[0] or ph
+    if sumber in peringatan_data and ph not in peringatan_tb:
+        peringatan_tb[ph] = peringatan_data[sumber]
 
 # -- Kelengkapan data: placeholder template vs Excel --
 st.markdown("**Kelengkapan Data**")
@@ -328,7 +500,8 @@ for tab, (nama_template, isi_template) in zip(tabs, template_bytes.items()):
                 "Isi Dokumen Terisi (Placeholder ditandai):",
                 value=highlight_placeholders(raw_text),
                 height=400,
-                key=nama_template + "_preview",
+                # Kunci ikut isi: widget berkunci tetap mengabaikan value baru
+                key=f"{nama_template}_preview_{hashlib.md5(raw_text.encode()).hexdigest()}",
                 disabled=True,
                 label_visibility="collapsed",
             )

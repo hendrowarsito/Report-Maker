@@ -259,3 +259,16 @@ def nama_file_hasil(pola: str, nama_template: str, data: dict[str, str]) -> str:
     hasil = _KARAKTER_TERLARANG.sub("-", hasil)
     hasil = re.sub(r"\s+", " ", hasil).strip(" ._-")
     return hasil[:150] or stem
+
+
+def konteks_placeholder(docx_bytes: bytes, lebar: int = 200) -> dict[str, str]:
+    """Kalimat di sekitar kemunculan pertama tiap placeholder, untuk memahami artinya."""
+    doc = Document(BytesIO(docx_bytes))
+    hasil: dict[str, str] = {}
+    for para in iter_all_paragraphs(doc):
+        teks = "".join(t.text or "" for t in para._element.iter(_W_T))
+        for m in _POLA_PLACEHOLDER.finditer(teks):
+            hasil.setdefault(
+                m.group(1), teks[max(0, m.start() - lebar): m.end() + lebar].strip()
+            )
+    return hasil

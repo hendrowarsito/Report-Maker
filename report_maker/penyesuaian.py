@@ -6,19 +6,15 @@ yang sudah terisi, lalu MENGUSULKAN penggantian kalimat yang tidak sesuai data.
 Tidak ada yang ditulis ke laporan sebelum penilai menyetujui usulan.
 """
 import base64
-import json
 from dataclasses import dataclass
 from io import BytesIO
 
 import anthropic
-import pandas as pd
 from docx import Document
-from openpyxl.utils import get_column_letter
 
+from .ai import minta_json
 from .docx_engine import _W_T, _replace_in_para_xml, iter_all_paragraphs
-from .terbilang import format_nilai
-
-MODEL_PENYESUAIAN = "claude-opus-5-5"
+from .lembar_kerja import baca_sel, sel_ke_teks
 
 
 # =============================================================================
@@ -54,27 +50,8 @@ def daftar_paragraf(docx_bytes: bytes) -> dict[int, str]:
 # =============================================================================
 
 def excel_ke_teks(xlsx_bytes: bytes) -> str:
-    """
-    Semua sheet Excel sebagai teks berlabel sel (mis. "B12: 312"), agar Claude
-    bisa menyebut sumbernya. Nilai rumus diambil dari hasil terakhir yang
-    disimpan Excel.
-    """
-    bagian = []
-    for nama_sheet, df in pd.read_excel(
-        BytesIO(xlsx_bytes), sheet_name=None, header=None, engine="openpyxl"
-    ).items():
-        baris_teks = []
-        for r, row in enumerate(df.itertuples(index=False), start=1):
-            sel = [
-                f"{get_column_letter(c)}{r}: {teks}"
-                for c, nilai in enumerate(row, start=1)
-                if (teks := format_nilai(nilai))
-            ]
-            if sel:
-                baris_teks.append(" | ".join(sel))
-        if baris_teks:
-            bagian.append(f"## Sheet: {nama_sheet}\n" + "\n".join(baris_teks))
-    return "\n\n".join(bagian)
+    """Semua sheet Excel sebagai teks berlabel sel (mis. "B12: 312")."""
+    return sel_ke_teks(baca_sel(xlsx_bytes))
 
 
 # =============================================================================
@@ -185,28 +162,7 @@ def usulkan_penyesuaian(
                 "Bandingkan laporan dengan dokumen sumber di atas dan berikan usulan.",
     })
 
-    with client.beta.messages.stream(
-        model=MODEL_PENYESUAIAN,
-        max_tokens=64000,
-        system=_SYSTEM,
-        messages=[{"role": "user", "content": konten}],
-        output_config={
-            "effort": "high",
-            "format": {"type": "json_schema", "schema": _SKEMA},
-        },
-        # Bila ditolak filter keamanan, ulangi otomatis di model cadangan Anthropic
-        betas=["server-side-fallback-2026-07-01"],
-        fallbacks="default",
-    ) as stream:
-        respons = stream.get_final_message()
-
-    if respons.stop_reason == "refusal":
-        raise RuntimeError("Permintaan ditolak oleh Claude. Coba lagi atau periksa dokumen sumber.")
-    if respons.stop_reason == "max_tokens":
-        raise RuntimeError("Jawaban Claude terpotong. Coba dengan dokumen sumber yang lebih sedikit.")
-
-    teks = next(b.text for b in respons.content if b.type == "text")
-    data = json.loads(teks)
+    data = minta_json(client, _SYSTEM, konten, _SKEMA)
     return [Usulan(**u) for u in data["usulan"]], data["catatan"]
 
 
