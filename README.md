@@ -42,6 +42,15 @@ Catatan:
 - Format angka mengikuti template: `1.000.000,00`, `1.000.000`, atau `250`.
   Nomor seperti nomor sertifikat ditulis apa adanya.
 - Hanya teks yang diganti yang berubah; format huruf di sekitarnya tetap.
+- Analisis berjalan di **latar belakang server** dengan tampilan kemajuan:
+  aman ditinggal pindah aplikasi atau layar mati. Sesi (file, hasil, pilihan
+  di tabel) dipertahankan 2 jam setelah koneksi terputus
+  (`server.disconnectedSessionTTL` di `.streamlit/config.toml`).
+- Hasil analisis disimpan di server selama 7 hari, dikunci dengan sidik isi
+  file: meng-upload ulang file yang sama langsung memuat hasilnya **tanpa
+  analisis ulang dan tanpa biaya**. Hasil hilang bila aplikasi di-reboot.
+- Bawaan memakai tingkat berpikir *medium* agar cepat; aktifkan **Analisis
+  lebih teliti** di Pengaturan untuk dokumen rumit.
 - Satu analisis memakai `claude-opus-5-5`; perkiraan biaya kasar
   US$0,30–1 per laporan tergantung jumlah halaman sumber. Total PDF maksimal
   30 MB.
@@ -181,6 +190,7 @@ report_maker/
   penyesuaian.py           usulan perubahan kalimat dari dokumen sumber (PDF/Excel)
   lembar_kerja.py          baca sel lembar kerja & pemetaan placeholder → sel
   analisis.py              analisis template + sumber, cek konsistensi antarsumber
+  pekerjaan.py             analisis di latar belakang + simpan hasil ke disk
   pdf.py                   konversi .docx → PDF lewat LibreOffice
 assets/logo_srr.png        logo di header dan ikon tab
 .streamlit/config.toml     tema warna SRR

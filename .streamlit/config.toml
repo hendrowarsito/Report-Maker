@@ -8,3 +8,9 @@ toolbarMode = "minimal"
 
 [browser]
 gatherUsageStats = false
+
+[server]
+# Sesi (file yang di-upload, hasil analisis, pilihan di tabel) dipertahankan
+# 2 jam setelah koneksi terputus — mis. HP tidur atau pindah aplikasi.
+# Bawaan Streamlit hanya 120 detik.
+disconnectedSessionTTL = 7200

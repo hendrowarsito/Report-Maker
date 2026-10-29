@@ -10,15 +10,16 @@ Laporan otomatis — tanpa placeholder.
 """
 import hashlib
 import os
+import time
 import zipfile
 from collections import Counter
 from io import BytesIO
 from pathlib import Path
 
-import anthropic
 import pandas as pd
 import streamlit as st
 
+from report_maker import pekerjaan
 from report_maker.ai import get_client
 from report_maker.analisis import Temuan, analisis_dokumen, rencana_perubahan
 from report_maker.checks import check_value_consistency_table
@@ -89,6 +90,11 @@ with st.expander("Pengaturan"):
     claude_ready = bool(api_key and api_key.startswith("sk-ant-"))
     if api_key and not claude_ready:
         st.warning("Format API key tidak valid.")
+    teliti = st.toggle(
+        "Analisis lebih teliti",
+        help="Claude berpikir lebih dalam — untuk dokumen rumit atau bila ada data "
+             "yang terlewat. Prosesnya lebih lama dan sedikit lebih mahal.",
+    )
 
 sumber_files = ([lembar_kerja] if lembar_kerja else []) + list(pendukung or [])
 if not (templates and sumber_files):
@@ -134,28 +140,79 @@ if not claude_ready:
     st.warning("Isi API key di Pengaturan untuk menjalankan analisis.")
     st.stop()
 
-if st.button(
+def _saring(temuan: list[Temuan]) -> int:
+    """Buang lokasi yang file/teksnya tidak benar-benar ada di template. Kembalikan jumlahnya."""
+    dibuang = 0
+    for t in temuan:
+        sah = []
+        for m in t.kemunculan:
+            m.dokumen = _cocokkan_sumber(m.dokumen, nama_template)
+            if m.teks_lama and m.teks_lama in paragraf_per_file.get(m.dokumen, {}).get(m.paragraf, ""):
+                sah.append(m)
+        dibuang += len(t.kemunculan) - len(sah)
+        t.kemunculan = sah
+    return dibuang
+
+
+@st.fragment(run_every=2)
+def _pantau_analisis(kunci: str) -> None:
+    """Tampilkan kemajuan analisis latar belakang; muat ulang halaman saat selesai."""
+    p = pekerjaan.status(kunci)
+    if p is None or p.status != "berjalan":
+        st.rerun()
+    detik = int(time.time() - p.mulai)
+    if p.karakter:
+        fase = f"Claude sedang menulis temuan… ({p.karakter:,} karakter diterima)".replace(",", ".")
+    else:
+        fase = "Claude sedang membaca template dan dokumen sumber…"
+    st.info(f"⏳ {fase} — {detik // 60}:{detik % 60:02d}")
+    st.caption(
+        "Analisis berjalan di server: aman ditinggal pindah aplikasi atau layar mati. "
+        "Bila sesi terputus lama, upload ulang file yang sama — hasilnya langsung muncul "
+        "tanpa analisis ulang."
+    )
+
+
+# Hasil analisis sebelumnya untuk file yang sama: muat dari disk, tanpa biaya
+if kunci_analisis not in st.session_state and (tersimpan := pekerjaan.muat_hasil(kunci)):
+    temuan_disk, catatan_disk = tersimpan
+    st.session_state[kunci_analisis] = (temuan_disk, catatan_disk, _saring(temuan_disk))
+    if not st.session_state.get(f"dimulai_{kunci}"):
+        st.toast("Hasil analisis sebelumnya untuk file yang sama dimuat — tanpa biaya.")
+
+berjalan = (p := pekerjaan.status(kunci)) is not None and p.status == "berjalan"
+if not berjalan and st.button(
     "Analisis ulang" if kunci_analisis in st.session_state else "Analisis dokumen",
     type="primary",
 ):
-    try:
-        with st.spinner("Claude sedang membaca template dan dokumen sumber… (bisa 1–5 menit)"):
-            temuan, catatan = analisis_dokumen(get_client(api_key), paragraf_per_file, sumber)
-    except (anthropic.APIError, RuntimeError, ValueError) as e:
-        st.error(f"Analisis gagal: {e}")
-    else:
-        # Buang kemunculan yang file/teksnya tidak benar-benar ada di template
-        dibuang = 0
-        for t in temuan:
-            sah = []
-            for m in t.kemunculan:
-                m.dokumen = _cocokkan_sumber(m.dokumen, nama_template)
-                teks_paragraf = paragraf_per_file.get(m.dokumen, {}).get(m.paragraf, "")
-                if m.teks_lama and m.teks_lama in teks_paragraf:
-                    sah.append(m)
-            dibuang += len(t.kemunculan) - len(sah)
-            t.kemunculan = sah
-        st.session_state[kunci_analisis] = (temuan, catatan, dibuang)
+    st.session_state.pop(kunci_analisis, None)
+    st.session_state[f"dimulai_{kunci}"] = True   # hasilnya nanti bukan "hasil sebelumnya"
+    pekerjaan.hapus_hasil(kunci)
+    pekerjaan.bersihkan_lama()
+    client = get_client(api_key)
+    effort = "high" if teliti else "medium"
+    pekerjaan.mulai(
+        kunci,
+        lambda progres: analisis_dokumen(
+            client, paragraf_per_file, sumber, effort=effort, progres=progres
+        ),
+    )
+    berjalan = True
+
+if berjalan:
+    _pantau_analisis(kunci)
+    st.stop()
+
+if (p := pekerjaan.status(kunci)) is not None and p.status == "gagal" \
+        and kunci_analisis not in st.session_state:
+    pesan = p.galat
+    if "authentication_error" in pesan or "invalid x-api-key" in pesan:
+        pesan = "API key tidak valid atau sudah dicabut. Periksa di Pengaturan."
+    elif "rate_limit" in pesan or "overloaded" in pesan:
+        pesan = "Layanan Claude sedang sibuk. Tunggu sebentar lalu klik Analisis lagi."
+    elif "credit balance" in pesan:
+        pesan = "Saldo kredit API habis. Isi ulang di console.anthropic.com."
+    st.error(f"Analisis gagal: {pesan}")
 
 if kunci_analisis not in st.session_state:
     st.stop()

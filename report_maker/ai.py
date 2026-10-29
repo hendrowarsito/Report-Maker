@@ -1,5 +1,6 @@
 """Review dokumen dengan Claude (opsional, butuh API key)."""
 import json
+from collections.abc import Callable
 
 import anthropic
 
@@ -18,10 +19,16 @@ def get_client(api_key: str) -> anthropic.Anthropic:
 
 
 def minta_json(
-    client: anthropic.Anthropic, system: str, konten: list[dict], skema: dict
+    client: anthropic.Anthropic,
+    system: str,
+    konten: list[dict],
+    skema: dict,
+    effort: str = "high",
+    progres: Callable[[int], None] | None = None,
 ) -> dict:
     """
     Satu permintaan ke Claude dengan jawaban JSON sesuai skema.
+    progres(n) dipanggil setiap ada potongan jawaban baru (n = jumlah karakter).
     RuntimeError bila permintaan ditolak atau jawabannya terpotong.
     """
     with client.beta.messages.stream(
@@ -30,13 +37,18 @@ def minta_json(
         system=system,
         messages=[{"role": "user", "content": konten}],
         output_config={
-            "effort": "high",
+            "effort": effort,
             "format": {"type": "json_schema", "schema": skema},
         },
         # Bila ditolak filter keamanan, ulangi otomatis di model cadangan Anthropic
         betas=["server-side-fallback-2026-07-01"],
         fallbacks="default",
     ) as stream:
+        if progres is not None:
+            diterima = 0
+            for potongan in stream.text_stream:
+                diterima += len(potongan)
+                progres(diterima)
         respons = stream.get_final_message()
 
     if respons.stop_reason == "refusal":

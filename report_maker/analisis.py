@@ -10,7 +10,8 @@ Angka terbilang tidak ditulis AI: aplikasi menghitungnya dari nilai terpilih.
 """
 import base64
 import re
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import asdict, dataclass, field
 from io import BytesIO
 from pathlib import Path
 
@@ -189,6 +190,8 @@ def analisis_dokumen(
     client: anthropic.Anthropic,
     template: dict[str, dict[int, str]],
     sumber: list[tuple[str, bytes]],
+    effort: str = "medium",
+    progres: Callable[[int], None] | None = None,
 ) -> tuple[list[Temuan], str]:
     """
     Kirim semua template + sumber ke Claude dalam satu permintaan, agar data
@@ -211,7 +214,7 @@ def analisis_dokumen(
         isi = "\n".join(f"[{i}] {teks}" for i, teks in paragraf.items())
         konten.append({"type": "text", "text": f"# Template: {nama} (paragraf bernomor)\n\n{isi}"})
 
-    data = minta_json(client, _SYSTEM, konten, _SKEMA)
+    data = minta_json(client, _SYSTEM, konten, _SKEMA, effort=effort, progres=progres)
 
     temuan = []
     for t in data["temuan"]:
@@ -284,3 +287,26 @@ def rencana_perubahan(
                     Usulan(m.paragraf, m.teks_lama, baru, t.nama, "", "")
                 )
     return perubahan, peringatan
+
+
+# =============================================================================
+# Simpan / muat hasil analisis
+# =============================================================================
+
+def temuan_ke_dict(temuan: list[Temuan], catatan: str) -> dict:
+    return {"temuan": [asdict(t) for t in temuan], "catatan": catatan}
+
+
+def temuan_dari_dict(data: dict) -> tuple[list[Temuan], str]:
+    temuan = [
+        Temuan(
+            nama=t["nama"],
+            kandidat=[Kandidat(**k) for k in t["kandidat"]],
+            rekomendasi=t["rekomendasi"],
+            konsisten=t["konsisten"],
+            penjelasan=t["penjelasan"],
+            kemunculan=[Kemunculan(**m) for m in t["kemunculan"]],
+        )
+        for t in data["temuan"]
+    ]
+    return temuan, data["catatan"]
