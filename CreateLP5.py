@@ -1,4 +1,5 @@
 import datetime
+import hashlib
 import numbers
 import re
 from io import BytesIO
@@ -9,8 +10,13 @@ import pandas as pd
 import streamlit as st
 from docx import Document
 
-st.set_page_config(page_title="SRR Kalibata Report Maker", layout="wide")
-st.markdown("# SRR Kalibata Report Maker")
+st.set_page_config(
+    page_title="SRR Kalibata Report Maker",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
+st.title("SRR Kalibata Report Maker")
+st.caption("Isi template laporan Word dari data Excel secara otomatis.")
 
 
 # =============================================================================
@@ -411,37 +417,6 @@ def apply_find_replace(doc: Document, pairs: list[tuple[str, str]]) -> int:
     return total
 
 
-def smart_replace_with_claude(
-    doc_text: str, find: str, replace: str, client: anthropic.Anthropic
-) -> str:
-    """
-    Minta Claude menentukan apakah setiap kemunculan kata perlu diganti
-    berdasarkan konteks kalimatnya (penggantian sensitif-konteks).
-    Kembalikan penjelasan keputusan Claude sebagai teks markdown.
-    Penggantian aktual tetap dilakukan oleh apply_find_replace —
-    fungsi ini hanya memberi analisis konteks untuk dikonfirmasi user.
-    """
-    with client.messages.stream(
-        model="claude-sonnet-4-6",
-        max_tokens=1500,
-        messages=[
-            {
-                "role": "user",
-                "content": (
-                    f'Dalam dokumen laporan penilaian aset/properti Indonesia berikut, '
-                    f'temukan setiap kemunculan kata **"{find}"** dan analisis:\n'
-                    f'- Apakah dalam konteks ini penggantian dengan **"{replace}"** tepat?\n'
-                    f'- Jika ada kemunculan yang TIDAK boleh diganti, jelaskan alasannya.\n\n'
-                    f'Dokumen (penggal):\n---\n{doc_text[:8000]}\n---\n\n'
-                    f'Jawab dalam markdown. Mulai dengan rekomendasi: '
-                    f'✅ Ganti semua / ⚠️ Ganti sebagian / ❌ Jangan ganti'
-                ),
-            }
-        ],
-    ) as stream:
-        return stream.get_final_text()
-
-
 # =============================================================================
 # File processing helpers
 # =============================================================================
@@ -559,18 +534,32 @@ def check_value_consistency_table(text: str) -> pd.DataFrame:
 
 
 # =============================================================================
-# Claude API — tiga fitur utama
+# Claude API — review dokumen
 # =============================================================================
 
 def _get_client(api_key: str) -> anthropic.Anthropic:
     return anthropic.Anthropic(api_key=api_key)
 
 
-def review_document_ai(doc_text: str, client: anthropic.Anthropic) -> str:
+def review_document_ai(
+    doc_text: str,
+    client: anthropic.Anthropic,
+    find_replace_pairs: list[tuple[str, str]] | None = None,
+) -> str:
     """
     Review QA lengkap dokumen yang sudah terisi via Claude Sonnet (streaming).
-    Cek: placeholder belum terisi, inkonsistensi nilai/tanggal, bagian kosong.
+    Cek: placeholder belum terisi, inkonsistensi nilai/tanggal, bagian kosong,
+    dan — bila ada — apakah hasil Find & Replace tepat sesuai konteks kalimat.
     """
+    cek_fr = ""
+    if find_replace_pairs:
+        daftar = "\n".join(f'   - "{f}" → "{r}"' for f, r in find_replace_pairs)
+        cek_fr = (
+            "6. **Find & Replace** — penggantian kata berikut sudah diterapkan. "
+            "Sebutkan kemunculan kata pengganti yang konteksnya keliru:\n"
+            f"{daftar}\n"
+        )
+
     with client.messages.stream(
         model="claude-sonnet-4-6",
         max_tokens=2000,
@@ -584,7 +573,8 @@ def review_document_ai(doc_text: str, client: anthropic.Anthropic) -> str:
                     "2. **Inkonsistensi nilai** — nominal angka yang sama berbeda di bagian lain\n"
                     "3. **Inkonsistensi tanggal** — tanggal tidak konsisten atau tidak logis\n"
                     "4. **Bagian kosong** — paragraf tidak lengkap\n"
-                    "5. **Anomali data** — nilai tidak wajar, nama tidak konsisten\n\n"
+                    "5. **Anomali data** — nilai tidak wajar, nama tidak konsisten\n"
+                    f"{cek_fr}\n"
                     f"Dokumen:\n---\n{doc_text[:10000]}\n---\n\n"
                     "Laporan audit dalam markdown terstruktur. "
                     "Mulai dengan baris status: ✅ LULUS / ⚠️ PERLU REVIEW / ❌ KRITIS"
@@ -596,18 +586,40 @@ def review_document_ai(doc_text: str, client: anthropic.Anthropic) -> str:
 
 
 # =============================================================================
-# Streamlit UI
+# Streamlit UI — tiga langkah: Upload → Periksa → Unduh
 # =============================================================================
 
-with st.sidebar:
-    st.header("📂 Upload Dokumen")
-    word_files = st.file_uploader(
-        "Template Laporan (.docx)", type=["docx"], accept_multiple_files=True
-    )
-    excel_file = st.file_uploader("Data Lembar Kerja (.xlsx)", type=["xlsx"])
+# ---------------------------------------------------------------------------
+# ① Upload
+# ---------------------------------------------------------------------------
+st.subheader("① Upload")
+col_word, col_excel = st.columns(2)
+word_files = col_word.file_uploader(
+    "Template Laporan (.docx)", type=["docx"], accept_multiple_files=True
+)
+excel_file = col_excel.file_uploader("Data Lembar Kerja (.xlsx)", type=["xlsx"])
 
-    st.divider()
-    st.header("🤖 Claude AI")
+with st.expander("⚙️ Pengaturan"):
+    st.markdown("**Excel**")
+    c1, c2 = st.columns(2)
+    sheet_name = c1.text_input("Nama Sheet", value="Laporan")
+    skiprows = c2.number_input("Lewati baris pertama", min_value=0, value=6, step=1)
+
+    st.markdown("**Find & Replace** — ganti kata langsung di dokumen, tanpa placeholder.")
+    df_fr = st.data_editor(
+        pd.DataFrame({"Cari": pd.Series(dtype=str), "Ganti dengan": pd.Series(dtype=str)}),
+        num_rows="dynamic",
+        use_container_width=True,
+        hide_index=True,
+        key="find_replace",
+    )
+    active_pairs = [
+        (str(f), "" if pd.isna(r) else str(r))
+        for f, r in zip(df_fr["Cari"], df_fr["Ganti dengan"])
+        if not pd.isna(f) and str(f).strip()
+    ]
+
+    st.markdown("**Claude AI** (opsional) — untuk review dokumen otomatis.")
     api_key = st.text_input(
         "API Key Anthropic",
         type="password",
@@ -617,228 +629,198 @@ with st.sidebar:
     claude_ready = bool(api_key and api_key.startswith("sk-ant-"))
     if api_key and not claude_ready:
         st.warning("Format API key tidak valid.")
-    elif claude_ready:
-        st.success("API key siap.")
 
-    st.divider()
-    st.header("⚙️ Konfigurasi Excel")
-    sheet_name = st.text_input("Nama Sheet", value="Laporan")
-    skiprows = st.number_input("Lewati baris pertama (skiprows)", min_value=0, value=6, step=1)
-
-    st.divider()
-    st.header("🔢 Terbilang Otomatis")
-    st.caption(
-        "Tambahkan akhiran pada key Excel di template Word. "
-        "Contoh untuk key `NP_nominal` = 200000000:"
-    )
+with st.expander("📖 Panduan Placeholder"):
     st.markdown(
-        "- `{{NP_nominal}}` → 200.000.000,00\n"
-        "- `{{NP_nominal_FORMAT}}` → Rp 200.000.000,00\n"
-        "- `{{NP_nominal_TERBILANG}}` → DUA RATUS JUTA RUPIAH\n"
-        "- `{{NP_nominal_TERBILANG_TITLE}}` → Dua Ratus Juta Rupiah"
+        "Tulis key dari kolom pertama Excel sebagai `{{key}}` di template Word. "
+        "Untuk nominal, tambahkan akhiran agar terbilang dibuat otomatis. "
+        "Contoh untuk key `NP_nominal` = 200000000:\n\n"
+        "| Placeholder | Hasil |\n|---|---|\n"
+        "| `{{NP_nominal}}` | 200.000.000,00 |\n"
+        "| `{{NP_nominal_FORMAT}}` | Rp 200.000.000,00 |\n"
+        "| `{{NP_nominal_TERBILANG}}` | DUA RATUS JUTA RUPIAH |\n"
+        "| `{{NP_nominal_TERBILANG_TITLE}}` | Dua Ratus Juta Rupiah |"
     )
     st.caption("Key sumber diformat ribuan hanya bila salah satu akhiran dipakai.")
 
-    st.divider()
-    st.header("🔄 Find & Replace")
-    st.caption("Ganti kata langsung di dokumen — tidak perlu placeholder.")
-
-    if "fr_pairs" not in st.session_state:
-        st.session_state.fr_pairs = [("", "")]
-
-    fr_pairs_ui: list[tuple[str, str]] = []
-    for i, (f_val, r_val) in enumerate(st.session_state.fr_pairs):
-        c1, c2 = st.columns(2)
-        find_val = c1.text_input("Cari", value=f_val, key=f"fr_find_{i}", label_visibility="collapsed", placeholder="Cari…")
-        repl_val = c2.text_input("Ganti", value=r_val, key=f"fr_repl_{i}", label_visibility="collapsed", placeholder="Ganti dengan…")
-        fr_pairs_ui.append((find_val, repl_val))
-
-    if st.button("＋ Tambah baris"):
-        st.session_state.fr_pairs = fr_pairs_ui + [("", "")]
-        st.rerun()
-    else:
-        st.session_state.fr_pairs = fr_pairs_ui
-
-    active_pairs = [(f, r) for f, r in fr_pairs_ui if f.strip()]
+if not (word_files and excel_file):
+    st.info("Upload template Word dan data Excel untuk melanjutkan.")
+    st.stop()
 
 
 # ---------------------------------------------------------------------------
 # Baca Excel & bangun data_dict
 # ---------------------------------------------------------------------------
+try:
+    df_excel = pd.read_excel(
+        excel_file,
+        header=None,
+        skiprows=int(skiprows),
+        sheet_name=sheet_name,
+        engine="openpyxl",
+    )
+except Exception as e:
+    st.error(f"Gagal membaca Excel: {e}")
+    st.stop()
 
-if excel_file:
-    try:
-        df_excel = pd.read_excel(
-            excel_file,
-            header=None,
-            skiprows=int(skiprows),
-            sheet_name=sheet_name,
-            engine="openpyxl",
-        )
-    except Exception as e:
-        st.error(f"Gagal membaca Excel: {e}")
-        st.stop()
+# Format tanggal/angka sebelum ditampilkan, agar yang terlihat di tabel
+# sama persis dengan yang akan ditempel ke laporan.
+df_excel = df_excel.apply(lambda col: col.map(format_nilai))
 
-    # Format tanggal/angka sebelum ditampilkan, agar yang terlihat di tabel
-    # sama persis dengan yang akan ditempel ke laporan.
-    df_excel = df_excel.apply(lambda col: col.map(format_nilai))
 
-    st.subheader("📊 Tabel Data pada Lembar Kerja (edit jika perlu)")
+# ---------------------------------------------------------------------------
+# ② Periksa
+# ---------------------------------------------------------------------------
+st.divider()
+st.subheader("② Periksa")
+
+with st.expander("✏️ Data Excel (bisa diedit)"):
     df_editable = st.data_editor(df_excel, num_rows="dynamic", use_container_width=True)
 
-    data_excel: dict[str, str] = {}
-    for _, row in df_editable.iterrows():
-        key = format_nilai(row.iloc[0])
-        if key:
-            data_excel[key] = format_nilai(row.iloc[1])
+data_excel: dict[str, str] = {}
+for _, row in df_editable.iterrows():
+    key = format_nilai(row.iloc[0])
+    if key:
+        data_excel[key] = format_nilai(row.iloc[1])
 
-    # ---------------------------------------------------------------------------
-    # Pindai placeholder template & buat terbilang otomatis dari akhiran nama
-    # ---------------------------------------------------------------------------
-    placeholders_per_file: dict[str, list[str]] = {}
-    for wf in word_files or []:
-        wf.seek(0)
-        for ph in collect_placeholders(Document(wf)):
-            placeholders_per_file.setdefault(ph, []).append(wf.name)
-        wf.seek(0)
+# Pindai placeholder template & buat terbilang otomatis dari akhiran nama
+placeholders_per_file: dict[str, list[str]] = {}
+for wf in word_files:
+    wf.seek(0)
+    for ph in collect_placeholders(Document(wf)):
+        placeholders_per_file.setdefault(ph, []).append(wf.name)
+    wf.seek(0)
 
-    auto_tb, peringatan_tb = generate_auto_terbilang(data_excel, set(placeholders_per_file))
-    data_dict = {**data_excel, **auto_tb}
+auto_tb, peringatan_tb = generate_auto_terbilang(data_excel, set(placeholders_per_file))
+data_dict = {**data_excel, **auto_tb}
 
-    # ---------------------------------------------------------------------------
-    # Cek kecocokan placeholder template vs data
-    # ---------------------------------------------------------------------------
-    if word_files:
-        st.subheader("✅ Cek Kelengkapan Data")
-        check_df = build_placeholder_check(
-            placeholders_per_file, data_excel, data_dict, peringatan_tb
-        )
-        if check_df.empty:
-            st.info("Tidak ada placeholder {{...}} di template.")
-        else:
-            jumlah_ok = check_df["Status"].str.startswith("✅").sum()
-            jumlah_masalah = len(check_df) - jumlah_ok
-            if jumlah_masalah:
-                st.warning(
-                    f"{jumlah_masalah} dari {len(check_df)} placeholder perlu diperiksa."
-                )
+# -- Kelengkapan data: placeholder template vs Excel --
+st.markdown("**Kelengkapan Data**")
+check_df = build_placeholder_check(
+    placeholders_per_file, data_excel, data_dict, peringatan_tb
+)
+if check_df.empty:
+    st.info("Tidak ada placeholder {{...}} di template.")
+else:
+    jumlah_masalah = (~check_df["Status"].str.startswith("✅")).sum()
+    if jumlah_masalah:
+        st.warning(f"{jumlah_masalah} dari {len(check_df)} placeholder perlu diperiksa.")
+    else:
+        st.success(f"Semua {len(check_df)} placeholder terisi.")
+    st.dataframe(check_df, use_container_width=True, hide_index=True)
+
+dipakai = set(placeholders_per_file) | {
+    _pecah_turunan(ph)[0] for ph in placeholders_per_file
+}
+tidak_dipakai = sorted(set(data_excel) - dipakai)
+if tidak_dipakai:
+    st.caption(
+        f"{len(tidak_dipakai)} key Excel tidak dipakai di template: "
+        + ", ".join(f"`{k}`" for k in tidak_dipakai)
+    )
+
+# -- Per dokumen: placeholder tersisa, konsistensi nominal, preview, review AI --
+processed_files = []
+masalah_per_file: dict[str, list[str]] = {}
+
+tabs = st.tabs([f"📁 {wf.name}" for wf in word_files])
+for tab, word_file in zip(tabs, word_files):
+    output_file, updated_doc = process_files(word_file, data_dict, active_pairs or None)
+    raw_text = extract_text_from_docx(updated_doc)
+    consistency_df = check_value_consistency_table(raw_text)
+    remaining = sorted(collect_placeholders(updated_doc), key=str.lower)
+    salah_nominal = consistency_df["Status"].str.startswith("❌").sum()
+
+    masalah = []
+    if remaining:
+        masalah.append(f"{len(remaining)} placeholder belum terganti")
+    if salah_nominal:
+        masalah.append(f"{salah_nominal} nominal tidak sesuai terbilang")
+    masalah_per_file[word_file.name] = masalah
+
+    with tab:
+        if remaining:
+            st.error(
+                f"**{len(remaining)} placeholder belum terganti:** "
+                + ", ".join(f"`{{{{{p}}}}}`" for p in remaining)
+            )
+
+        if not consistency_df.empty:
+            st.markdown("**Nominal vs Terbilang**")
+            if salah_nominal:
+                st.warning("Terdapat ketidaksesuaian nominal — periksa sebelum diunduh.")
             else:
-                st.success(f"Semua {len(check_df)} placeholder terisi.")
-            st.dataframe(check_df, use_container_width=True, hide_index=True)
+                st.success("Semua nominal sesuai dengan terbilangnya.")
+            st.dataframe(consistency_df, use_container_width=True, hide_index=True)
 
-        dipakai = set(placeholders_per_file) | {
-            _pecah_turunan(ph)[0] for ph in placeholders_per_file
-        }
-        tidak_dipakai = sorted(set(data_excel) - dipakai)
-        if tidak_dipakai:
-            st.caption(
-                f"{len(tidak_dipakai)} key Excel tidak dipakai di template: "
-                + ", ".join(f"`{k}`" for k in tidak_dipakai)
+        if not masalah and consistency_df.empty:
+            st.success("Tidak ada masalah ditemukan.")
+
+        with st.expander("👁️ Preview isi dokumen"):
+            st.text_area(
+                "Isi Dokumen Terisi (Placeholder ditandai):",
+                value=highlight_placeholders(raw_text),
+                height=400,
+                key=word_file.name + "_preview",
+                disabled=True,
+                label_visibility="collapsed",
             )
 
-    # ---------------------------------------------------------------------------
-    # Preview & proses setiap file Word
-    # ---------------------------------------------------------------------------
-    if word_files:
-        st.subheader("📄 Preview Laporan — cek sebelum dibuat filenya")
-        processed_files = []
-
-        for word_file in word_files:
-            output_file, updated_doc = process_files(word_file, data_dict, active_pairs or None)
-            raw_text = extract_text_from_docx(updated_doc)
-            preview_text = highlight_placeholders(raw_text)
-            consistency_df = check_value_consistency_table(raw_text)
-            remaining = sorted(collect_placeholders(updated_doc), key=str.lower)
-
-            with st.expander(f"📁 {word_file.name}", expanded=True):
-
-                # -- Peringatan placeholder belum terisi (tanpa AI) --
-                if remaining:
-                    st.error(
-                        f"**{len(remaining)} placeholder belum terganti:** "
-                        + ", ".join(f"`{{{{{p}}}}}`" for p in remaining)
+        # -- Satu tombol review AI (termasuk konteks Find & Replace) --
+        # Hasil disimpan per isi dokumen, jadi review lama tidak tampil
+        # setelah data atau Find & Replace diubah.
+        review_key = "review_" + hashlib.md5(
+            (raw_text + repr(active_pairs)).encode()
+        ).hexdigest()
+        if claude_ready:
+            if st.button("🤖 Periksa dengan AI", key=word_file.name + "_ai_btn"):
+                with st.spinner("Claude sedang mereview dokumen..."):
+                    st.session_state[review_key] = review_document_ai(
+                        raw_text, _get_client(api_key), active_pairs
                     )
-
-                # -- Preview teks --
-                st.text_area(
-                    "Isi Dokumen Terisi (Placeholder ditandai):",
-                    value=preview_text,
-                    height=400,
-                    key=word_file.name + "_preview",
-                    disabled=True,
-                    label_visibility="collapsed",
-                )
-
-                # -- Tabel konsistensi nominal --
-                if not consistency_df.empty:
-                    st.markdown("🔍 **Cek Konsistensi Nominal Angka vs Terbilang**")
-                    st.dataframe(consistency_df, use_container_width=True, hide_index=True)
-
-                    if consistency_df["Status"].str.startswith("❌").any():
-                        st.warning("Terdapat ketidaksesuaian nominal — periksa sebelum diunduh.")
-                    else:
-                        st.success("Semua nominal sesuai dengan terbilangnya.")
-
-                # -- Review dokumen lengkap dengan AI --
-                if claude_ready:
-                    st.markdown("---")
-                    if st.button(
-                        "🤖 Review Lengkap Dokumen dengan AI",
-                        key=word_file.name + "_review_btn",
-                    ):
-                        client = _get_client(api_key)
-                        with st.spinner("Claude sedang mereview dokumen..."):
-                            review_result = review_document_ai(raw_text, client)
-                        st.session_state[word_file.name + "_review"] = review_result
-
-                    if word_file.name + "_review" in st.session_state:
-                        st.markdown("**Hasil Review AI:**")
-                        st.markdown(st.session_state[word_file.name + "_review"])
-
-                # -- Analisis konteks Find & Replace dengan Claude --
-                if claude_ready and active_pairs:
-                    st.markdown("---")
-                    st.markdown("**🔄 Analisis Konteks Find & Replace**")
-                    for find_word, replace_word in active_pairs:
-                        btn_key = f"{word_file.name}_fr_{find_word}"
-                        if st.button(
-                            f'Analisis: "{find_word}" → "{replace_word}"',
-                            key=btn_key,
-                        ):
-                            client = _get_client(api_key)
-                            with st.spinner(f'Claude menganalisis konteks "{find_word}"...'):
-                                analysis = smart_replace_with_claude(
-                                    raw_text, find_word, replace_word, client
-                                )
-                            st.session_state[btn_key + "_result"] = analysis
-
-                        if btn_key + "_result" in st.session_state:
-                            st.markdown(st.session_state[btn_key + "_result"])
-
-            processed_files.append((word_file.name, output_file))
-
-        # ---------------------------------------------------------------------------
-        # Unduh hasil
-        # ---------------------------------------------------------------------------
-        st.subheader("⬇️ Unduh Hasil")
-        if len(processed_files) == 1:
-            file_name, file_obj = processed_files[0]
-            st.download_button(
-                label="Unduh Dokumen",
-                data=file_obj,
-                file_name=file_name.replace(".docx", "_terisi.docx"),
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            )
+            if review_key in st.session_state:
+                st.markdown(st.session_state[review_key])
         else:
-            zip_buffer = BytesIO()
-            with zipfile.ZipFile(zip_buffer, "w") as zipf:
-                for name, file_obj in processed_files:
-                    filename = name.replace(".docx", "_terisi.docx")
-                    zipf.writestr(filename, file_obj.getvalue())
-            zip_buffer.seek(0)
-            st.download_button(
-                label="Unduh Semua Dokumen (.zip)",
-                data=zip_buffer,
-                file_name="Semua_Dokumen_Terisi.zip",
-                mime="application/zip",
-            )
+            st.caption("💡 Isi API key di ⚙️ Pengaturan untuk review dokumen dengan AI.")
+
+    processed_files.append((word_file.name, output_file))
+
+
+# ---------------------------------------------------------------------------
+# ③ Unduh
+# ---------------------------------------------------------------------------
+st.divider()
+st.subheader("③ Unduh")
+
+ada_masalah = {nama: m for nama, m in masalah_per_file.items() if m}
+if ada_masalah:
+    st.warning(
+        "Masih ada yang perlu diperiksa:\n"
+        + "\n".join(f"- **{nama}**: {', '.join(m)}" for nama, m in ada_masalah.items())
+    )
+else:
+    st.success("Semua dokumen siap diunduh.")
+
+if len(processed_files) == 1:
+    file_name, file_obj = processed_files[0]
+    st.download_button(
+        label="⬇️ Unduh Dokumen",
+        data=file_obj,
+        file_name=file_name.replace(".docx", "_terisi.docx"),
+        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        type="primary",
+    )
+else:
+    zip_buffer = BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w") as zipf:
+        for name, file_obj in processed_files:
+            filename = name.replace(".docx", "_terisi.docx")
+            zipf.writestr(filename, file_obj.getvalue())
+    zip_buffer.seek(0)
+    st.download_button(
+        label="⬇️ Unduh Semua Dokumen (.zip)",
+        data=zip_buffer,
+        file_name="Semua_Dokumen_Terisi.zip",
+        mime="application/zip",
+        type="primary",
+    )
