@@ -298,6 +298,10 @@ def bandingkan_format(asli: bytes, hasil: bytes) -> list[str]:
         for t in root.iter(_W_T):
             t.text = None
             t.attrib.pop(_XML_SPACE, None)
+        # Daftar jenis isi & relasi: urutannya tidak bermakna (python-docx menyusun ulang)
+        if nama == "[Content_Types].xml" or nama.endswith(".rels"):
+            anak = sorted(root, key=lambda e: etree.tostring(e, method="c14n"))
+            root[:] = anak
         return etree.tostring(root, method="c14n")
 
     za = zipfile.ZipFile(BytesIO(asli))
@@ -307,3 +311,17 @@ def bandingkan_format(asli: bytes, hasil: bytes) -> list[str]:
         if _kerangka(za.read(nama), nama) != _kerangka(zb.read(nama), nama):
             beda.append(nama)
     return beda
+
+
+def ikuti_kapitalisasi(lama: str, baru: str) -> str:
+    """
+    Pertahankan gaya huruf template: bila teks lama ditulis KAPITAL SEMUA
+    (mis. nama penerima surat), teks pengganti ikut kapital. Placeholder
+    {{...}} tidak dianggap memberi contoh gaya.
+    """
+    if "{{" in lama:
+        return baru
+    huruf = [c for c in lama if c.isalpha()]
+    if len(huruf) >= 2 and all(c.isupper() for c in huruf):
+        return baru.upper()
+    return baru

@@ -6,14 +6,14 @@ yang sudah terisi, lalu MENGUSULKAN penggantian kalimat yang tidak sesuai data.
 Tidak ada yang ditulis ke laporan sebelum penilai menyetujui usulan.
 """
 import base64
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from io import BytesIO
 
 import anthropic
 from docx import Document
 
 from .ai import minta_json
-from .docx_engine import _W_T, _replace_in_para_xml, iter_all_paragraphs
+from .docx_engine import _W_T, _replace_in_para_xml, ikuti_kapitalisasi, iter_all_paragraphs
 from .lembar_kerja import baca_sel, sel_ke_teks
 
 
@@ -115,6 +115,10 @@ jelaskan di "catatan".
 - "teks_lama" harus disalin persis dari teks paragraf (huruf, spasi, tanda baca), \
 sependek mungkin tetapi tetap unik di paragraf itu — cukup frasa atau kalimat \
 yang berubah, bukan seluruh paragraf.
+- Pertahankan gaya penulisan template: huruf kapital (bila template menulis \
+nama dengan KAPITAL SEMUA, tetap kapital), singkatan, dan tanda baca. Jangan \
+usulkan perubahan yang hanya beda huruf besar/kecil, ejaan nama yang setara, \
+atau format.
 - "teks_baru" mengikuti gaya bahasa dan format laporan (format angka Indonesia, \
 huruf kapital, satuan). Bila angka berubah, sesuaikan juga terbilangnya dalam \
 usulan yang sama.
@@ -172,12 +176,15 @@ def validasi_usulan(
     """Pisahkan usulan yang bisa diterapkan dari yang tidak (beserta alasannya)."""
     valid, tidak_valid = [], []
     for u in usulan:
+        u = replace(u, teks_baru=ikuti_kapitalisasi(u.teks_lama, u.teks_baru))
         if u.paragraf not in paragraf:
             tidak_valid.append((u, f"Paragraf [{u.paragraf}] tidak ada"))
         elif not u.teks_lama or u.teks_lama not in paragraf[u.paragraf]:
             tidak_valid.append((u, "Teks lama tidak ditemukan di paragraf"))
         elif u.teks_lama == u.teks_baru:
             tidak_valid.append((u, "Tidak ada perubahan"))
+        elif u.teks_lama.casefold() == u.teks_baru.casefold():
+            tidak_valid.append((u, "Hanya beda huruf besar/kecil — gaya template dipertahankan"))
         else:
             valid.append(u)
     return valid, tidak_valid

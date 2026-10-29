@@ -158,3 +158,15 @@ def test_analisis_dokumen_nilai_lembar_kerja_dari_sel_asli():
     assert shm["type"] == "document" and shm["cache_control"] == {"type": "ephemeral"}
     assert surat["text"] == "# Template: Surat.docx (paragraf bernomor)\n\n[0] Dengan hormat,"
     assert bab2["text"].startswith("# Template: Bab 2.docx") and "[0] luas 250 m²" in bab2["text"]
+
+
+def test_rencana_perubahan_ikuti_gaya_huruf_template():
+    temuan = [Temuan("Pemberi tugas", kemunculan=[
+        Kemunculan(9, "PT JTRUST INVESTMENTS INDONESIA", "teks", "Surat.docx"),
+        Kemunculan(23, "PT Lama", "teks", "Surat.docx"),
+    ])]
+    perubahan, _ = rencana_perubahan(temuan, {0: "PT JTrust Investments Indonesia"})
+    # Penerima surat (kapital) sudah benar → tidak diubah; kemunculan lain diganti
+    assert perubahan == {"Surat.docx": [
+        Usulan(23, "PT Lama", "PT JTrust Investments Indonesia", "Pemberi tugas", "", ""),
+    ]}

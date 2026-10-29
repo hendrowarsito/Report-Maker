@@ -19,7 +19,7 @@ import anthropic
 from docx import Document
 
 from .ai import minta_json
-from .docx_engine import extract_text_from_docx
+from .docx_engine import extract_text_from_docx, ikuti_kapitalisasi
 from .lembar_kerja import baca_sel, sel_ke_teks
 from .penyesuaian import Usulan
 from .terbilang import (
@@ -183,6 +183,9 @@ sertifikat, NIB, nomor IMB), "angka" (jumlah/besaran: luas, nilai, harga), \
 Rupiah). Terbilang dibuat aplikasi dari angka terpilih.
 6. Sertakan juga data yang di template sudah benar, agar penilai bisa \
 memeriksa konsistensi antarsumber.
+7. Jangan masukkan kemunculan yang di template sudah benar dan hanya beda \
+huruf besar/kecil atau gaya penulisan (mis. "PT ABC INDONESIA" vs \
+"PT ABC Indonesia") — gaya template dipertahankan.
 Semua teks penjelasan dalam bahasa Indonesia, singkat.\
 """
 
@@ -253,7 +256,7 @@ def teks_pengganti(kemunculan: Kemunculan, nilai: str) -> str | None:
     angka/terbilang tetapi nilainya bukan angka.
     """
     if kemunculan.bentuk == "teks":
-        return nilai
+        return ikuti_kapitalisasi(kemunculan.teks_lama, nilai)
     angka = parse_ke_int(nilai)
     if angka is None:
         return None
@@ -290,7 +293,7 @@ def rencana_perubahan(
                     f"{t.nama}: “{nilai}” bukan angka, {m.bentuk} di {m.dokumen} "
                     f"paragraf [{m.paragraf}] dilewati"
                 )
-            elif baru != m.teks_lama:
+            elif baru.casefold() != m.teks_lama.casefold():
                 perubahan.setdefault(m.dokumen, []).append(
                     Usulan(m.paragraf, m.teks_lama, baru, t.nama, "", "")
                 )

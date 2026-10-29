@@ -123,3 +123,25 @@ def test_usulkan_penyesuaian_gagal_jelas(stop_reason):
     client = _FakeClient({"usulan": [], "catatan": ""}, stop_reason)
     with pytest.raises(RuntimeError):
         usulkan_penyesuaian(client, {0: "x"}, [], [("a.xlsx", "A1: 1")])
+
+
+def test_gaya_huruf_template_dipertahankan():
+    from report_maker.docx_engine import ikuti_kapitalisasi
+
+    assert ikuti_kapitalisasi("PT JTRUST INVESTMENTS INDONESIA", "PT JTrust Investments") \
+        == "PT JTRUST INVESTMENTS"
+    assert ikuti_kapitalisasi("Jl. Lama No. 1", "Jl. Baru No. 5") == "Jl. Baru No. 5"
+    assert ikuti_kapitalisasi("{{NAMA_PT}}", "PT Abc") == "PT Abc"
+    assert ikuti_kapitalisasi("1.000", "2.000") == "2.000"
+
+    par = {0: "Kepada Yth. PT JTRUST INVESTMENTS INDONESIA", 1: "PT LAMA SEJAHTERA"}
+    hanya_huruf = Usulan(0, "PT JTRUST INVESTMENTS INDONESIA", "PT JTrust Investments Indonesia",
+                         "", "", "")
+    ganti_nama = Usulan(1, "PT LAMA SEJAHTERA", "PT Bank Contoh", "", "", "")
+    valid, tidak_valid = validasi_usulan(par, [hanya_huruf, ganti_nama])
+    assert [u.teks_baru for u in valid] == ["PT BANK CONTOH"]
+    # Setelah ikut kapital, usulan pertama sama persis dengan template → tidak diterapkan
+    assert tidak_valid[0][1] == "Tidak ada perubahan"
+    beda_huruf = Usulan(0, "Kepada Yth.", "KEPADA YTH.", "", "", "")
+    _, tidak_valid = validasi_usulan(par, [beda_huruf])
+    assert tidak_valid[0][1].startswith("Hanya beda huruf besar/kecil")
