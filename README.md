@@ -22,9 +22,21 @@ Aplikasi terbuka di `http://localhost:8501` dengan dua halaman (menu di atas).
    data objek yang harus diisi/diganti (pemberi tugas, alamat, sertifikat,
    NIB, pemegang hak, luas, IMB, nilai, tanggal, dll.) — baik berupa
    placeholder `{{...}}` maupun data dari laporan lama.
-3. Untuk setiap data, Claude mengambil nilainya dari **setiap** sumber dan
-   menyarankan sumber yang paling berwenang (data tanah → sertifikat,
-   bangunan → IMB, penugasan → proposal, angka penilaian → lembar kerja).
+3. Untuk setiap data, Claude mengambil nilainya dari **setiap** sumber
+   (termasuk masing-masing sertifikat bila ada beberapa) dan menandai nilai
+   yang tidak terbaca jelas (buram, dicoret, tulisan tangan meragukan).
+   Sumber yang dipakai ditentukan **aturan tetap** aplikasi, bukan AI:
+
+   | Kategori data | Sumber utama | Bila tidak ada / tidak jelas |
+   |---|---|---|
+   | Sertifikat (nomor & jenis hak, NIB, luas tanah, pemegang hak, terbit, surat ukur, letak) | Sertifikat | Lembar kerja |
+   | Bangunan | IMB/PBG | Lembar kerja |
+   | Penugasan (pemberi tugas, debitur, proposal) | Proposal | Lembar kerja |
+   | Hasil penilaian (tanggal, nilai, kurs) | Lembar kerja | — |
+
+   Nilai 0 (perhitungan belum selesai) tidak pernah dipilih. Kolom *Dasar
+   pilihan* menjelaskan alasannya. Jenis dokumen dikenali Claude, atau dari
+   nama file (SHM/SHGB/sertifikat, IMB/PBG, proposal/SPN, .xlsx).
 4. Konsistensi antarsumber dicek: data yang **berbeda** (mis. luas di lembar
    kerja 312 m², di sertifikat 315 m²) tampil paling atas dengan ⚠️.
 5. Periksa tabel temuan. Kolom **Gunakan** berisi sumber yang disarankan —
@@ -45,8 +57,9 @@ Aplikasi terbuka di `http://localhost:8501` dengan dua halaman (menu di atas).
 Catatan:
 - Nilai dari lembar kerja selalu dibaca dari **sel aslinya**, bukan salinan
   AI. Terbilang dihitung aplikasi dari angka terpilih, bukan ditulis AI.
-- Format angka mengikuti template: `1.000.000,00`, `1.000.000`, atau `250`.
-  Nomor seperti nomor sertifikat ditulis apa adanya.
+- Format angka mengikuti template — desimal, titik ribuan, dan satuan:
+  "1.974,00 m²" dari sertifikat ditulis `1.974,00` bila template `455,00`.
+  Nomor/kode (diawali nol, mis. `05396`) ditulis apa adanya.
 - Hanya teks yang diganti yang berubah; format huruf di sekitarnya tetap.
   Di langkah Unduh, setiap file hasil **diverifikasi** terhadap templatenya:
   gaya, tabel, header/footer, gambar, dan penomoran harus identik — hanya isi

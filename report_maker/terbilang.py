@@ -130,6 +130,38 @@ def parse_ke_int(nilai) -> int | None:
         return None
 
 
+# Angka Indonesia dengan awalan/satuan yang lazim di laporan penilaian:
+# "Rp 1.250.000", "1.974,00 m²", "12,5%", "Rp 1.000.000,-"
+_POLA_ANGKA_BERSATUAN = re.compile(
+    r"^\s*(?:rp\.?\s*)?(-?\d[\d.,]*)\s*(?:m²|m2|m\^2|meter persegi|%|,-|m)?\s*$",
+    re.IGNORECASE,
+)
+
+
+def parse_angka(nilai) -> float | None:
+    """
+    Angka dari teks bergaya Indonesia, boleh dengan "Rp" dan satuan (m², %).
+    Titik = pemisah ribuan, koma = desimal. None bila bukan angka (mis. tanggal).
+      "1.974,00 m²" → 1974.0   "Rp 595.400.000" → 595400000.0   "0,25" → 0.25
+    """
+    if isinstance(nilai, bool):
+        return None
+    if isinstance(nilai, (int, float)):
+        return float(nilai)
+    m = _POLA_ANGKA_BERSATUAN.match(str(nilai).replace("\xa0", " "))
+    if not m:
+        return None
+    angka = m.group(1).rstrip(".,")
+    if "," in angka:
+        angka = angka.replace(".", "").replace(",", ".")
+    elif re.fullmatch(r"-?\d{1,3}(\.\d{3})+", angka):
+        angka = angka.replace(".", "")
+    try:
+        return float(angka)
+    except ValueError:
+        return None
+
+
 def format_angka_indonesia(n: int) -> str:
     """
     Format angka ke gaya Indonesia tanpa prefix Rp.

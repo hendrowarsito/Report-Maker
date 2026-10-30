@@ -31,9 +31,18 @@ from report_maker.penyesuaian import Usulan
     # Tanpa pemisah ribuan di template: jangan tambahkan titik, nol di depan tetap
     ("angka", "0999", "1234", "1234"),
     ("angka", "250", "0312", "0312"),
-    ("angka", "250", "1.312", "1312"),
+    ("angka", "250", "1.312", "1.312"),
     # Placeholder tidak memberi contoh format: angka besar diberi titik ribuan
     ("angka", "{{nilai_pasar}}", "595400000", "595.400.000"),
+    # Satuan & desimal dari sertifikat, gaya dari template
+    ("angka", "455,00", "1.974,00 m²", "1.974,00"),
+    ("angka", "455,00 m²", "1974", "1.974,00 m²"),
+    ("angka", "250", "416 m2", "416"),
+    ("angka", "1.000.000,00", "Rp 595.400.000", "595.400.000,00"),
+    ("angka", "250", "312,5", "312,5"),
+    ("terbilang", "X", "Rp 595.400.000", "LIMA RATUS SEMBILAN PULUH LIMA JUTA EMPAT RATUS RIBU RUPIAH"),
+    # Nilai 0 (perhitungan belum selesai) tidak ditulis
+    ("angka", "1.000.000,00", "0,00", None),
     ("teks", "{{nilai_pasar}}", "595.400.000", "595.400.000"),
 ])
 def test_teks_pengganti(bentuk, teks_lama, nilai, hasil):
@@ -69,7 +78,8 @@ def test_rencana_perubahan_lewati_yang_sama_dan_bukan_angka():
 
     _, peringatan = rencana_perubahan(temuan, {1: "tiga ratus"})
     assert peringatan == [
-        "Luas tanah: “tiga ratus” bukan angka, angka di Bab 1.docx paragraf [1] dilewati"
+        "**Luas tanah**: “tiga ratus” bukan angka — 1 lokasi angka/terbilang tidak diubah "
+        "(Bab 1 (1×)). Pilih sumber lain atau isi manual."
     ]
 
 
@@ -148,9 +158,9 @@ def test_analisis_dokumen_nilai_lembar_kerja_dari_sel_asli():
         [("LK.xlsx", _xlsx()), ("SHM.pdf", b"%PDF-1.4")],
     )
     assert temuan[0].kandidat == [
-        Kandidat("LK.xlsx", "LK Tanah!C2", "312"),
-        Kandidat("LK.xlsx", "LK Tanah!C3", "595.400.000"),
-        Kandidat("SHM.pdf", "hal. 1", "312"),
+        Kandidat("LK.xlsx", "LK Tanah!C2", "312", True, "lembar_kerja"),
+        Kandidat("LK.xlsx", "LK Tanah!C3", "595.400.000", True, "lembar_kerja"),
+        Kandidat("SHM.pdf", "hal. 1", "312", True, "sertifikat"),
     ]
     assert temuan[0].kemunculan == [Kemunculan(0, "250", "angka", "Bab 2.docx")]
 
@@ -170,3 +180,60 @@ def test_rencana_perubahan_ikuti_gaya_huruf_template():
     assert perubahan == {"Surat.docx": [
         Usulan(23, "PT Lama", "PT JTrust Investments Indonesia", "Pemberi tugas", "", ""),
     ]}
+
+
+from report_maker.analisis import pilih_sumber, tebak_jenis_sumber  # noqa: E402
+
+
+@pytest.mark.parametrize("nama, jenis", [
+    ("SEQ 1 - SHM+05396+.pdf", "sertifikat"),
+    ("Sertipikat HGB 123.pdf", "sertifikat"),
+    ("49-JTII-Cost-Kasmiwati.xlsx", "lembar_kerja"),
+    ("IMB No 45.pdf", "imb_pbg"),
+    ("260916.001-SPN-A-JTrust.pdf", "proposal"),
+    ("foto.pdf", "lainnya"),
+])
+def test_tebak_jenis_sumber(nama, jenis):
+    assert tebak_jenis_sumber(nama) == jenis
+
+
+def _t(kategori, *kandidat, bentuk="teks", rekomendasi=""):
+    return Temuan("Data", list(kandidat), rekomendasi, True, "",
+                  [Kemunculan(0, "x", bentuk, "a.docx")], kategori)
+
+
+LK = "LK.xlsx"
+SHM = "SHM 05396.pdf"
+
+
+def test_data_sertifikat_dari_sertifikat_bila_jelas():
+    t = _t("sertifikat",
+           Kandidat(LK, "Laporan!B31", "1.974,00", True, "lembar_kerja"),
+           Kandidat(SHM, "hal. 2", "1.974,00 m²", True, "sertifikat"),
+           bentuk="angka", rekomendasi=LK)
+    assert pilih_sumber(t) == (SHM, "Sertifikat")
+
+
+def test_data_sertifikat_tidak_jelas_pakai_lembar_kerja():
+    t = _t("sertifikat",
+           Kandidat(SHM, "hal. 1", "Ujung Padang (dicoret)", False, "sertifikat"),
+           Kandidat(LK, "Laporan!B15", "Desa Bandar Ratu", True, "lembar_kerja"))
+    assert pilih_sumber(t) == (LK, "Lembar kerja (sertifikat tidak jelas)")
+    t = _t("sertifikat", Kandidat(LK, "Laporan!B37", "Kasmiwati", True, "lembar_kerja"))
+    assert pilih_sumber(t) == (LK, "Lembar kerja (sertifikat tidak memuat data ini)")
+
+
+def test_nilai_nol_tidak_dipilih():
+    t = _t("penilaian", Kandidat(LK, "Laporan!B67", "0,00", True, "lembar_kerja"), bentuk="angka")
+    assert pilih_sumber(t)[0] == ""
+    # Nilai teks "0" untuk data teks tetap boleh
+    t = _t("penilaian", Kandidat(LK, "A1", "0", True, "lembar_kerja"))
+    assert pilih_sumber(t)[0] == LK
+
+
+def test_beberapa_sertifikat_pakai_yang_jelas_pertama():
+    t = _t("sertifikat",
+           Kandidat("SHM 1.pdf", "hal. 1", "05396", False, "sertifikat"),
+           Kandidat("SHM 2.pdf", "hal. 1", "05379", True, "sertifikat"),
+           Kandidat(LK, "B33", "05396", True, "lembar_kerja"))
+    assert pilih_sumber(t) == ("SHM 2.pdf", "Sertifikat")

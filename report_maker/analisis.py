@@ -10,6 +10,7 @@ Angka terbilang tidak ditulis AI: aplikasi menghitungnya dari nilai terpilih.
 """
 import base64
 import re
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from io import BytesIO
@@ -25,12 +26,27 @@ from .penyesuaian import Usulan
 from .terbilang import (
     angka_ke_terbilang,
     angka_ke_terbilang_title,
-    format_angka_indonesia,
     format_ribuan,
-    parse_ke_int,
+    parse_angka,
 )
 
 BENTUK = ["teks", "angka", "terbilang", "terbilang_judul"]
+JENIS_SUMBER = ["sertifikat", "imb_pbg", "proposal", "lembar_kerja", "lainnya"]
+KATEGORI = ["sertifikat", "bangunan", "penugasan", "penilaian", "lainnya"]
+
+# Urutan sumber per kategori data — aturan tetap, bukan pilihan AI:
+# data sertifikat dari sertifikat; bila tidak ada/tidak jelas, dari lembar kerja.
+URUTAN_SUMBER = {
+    "sertifikat": ["sertifikat", "lembar_kerja"],
+    "bangunan":   ["imb_pbg", "lembar_kerja"],
+    "penugasan":  ["proposal", "lembar_kerja"],
+    "penilaian":  ["lembar_kerja"],
+    "lainnya":    ["lembar_kerja"],
+}
+LABEL_JENIS = {
+    "sertifikat": "sertifikat", "imb_pbg": "IMB/PBG", "proposal": "proposal",
+    "lembar_kerja": "lembar kerja", "lainnya": "dokumen lain",
+}
 
 
 @dataclass
@@ -38,6 +54,8 @@ class Kandidat:
     sumber: str      # nama file
     lokasi: str      # "hal. 1" / "LK Tanah!C5"
     nilai: str
+    jelas: bool = True          # terbaca jelas (bukan buram/coretan/tulisan tangan ragu)
+    jenis: str = "lainnya"      # jenis dokumen sumber, salah satu JENIS_SUMBER
 
 
 @dataclass
@@ -52,10 +70,11 @@ class Kemunculan:
 class Temuan:
     nama: str
     kandidat: list[Kandidat] = field(default_factory=list)
-    rekomendasi: str = ""        # nama file sumber yang disarankan
+    rekomendasi: str = ""        # nama file sumber yang disarankan Claude
     konsisten: bool = True
     penjelasan: str = ""
     kemunculan: list[Kemunculan] = field(default_factory=list)
+    kategori: str = "lainnya"    # salah satu KATEGORI
 
 
 # =============================================================================
@@ -101,6 +120,7 @@ _SKEMA = {
                 "type": "object",
                 "properties": {
                     "nama": {"type": "string"},
+                    "kategori": {"type": "string", "enum": KATEGORI},
                     "kandidat": {
                         "type": "array",
                         "items": {
@@ -109,8 +129,9 @@ _SKEMA = {
                                 "sumber": {"type": "string"},
                                 "lokasi": {"type": "string"},
                                 "nilai": {"type": "string"},
+                                "jelas": {"type": "boolean"},
                             },
-                            "required": ["sumber", "lokasi", "nilai"],
+                            "required": ["sumber", "lokasi", "nilai", "jelas"],
                             "additionalProperties": False,
                         },
                     },
@@ -133,14 +154,27 @@ _SKEMA = {
                     },
                 },
                 "required": [
-                    "nama", "kandidat", "rekomendasi", "konsisten", "penjelasan", "kemunculan",
+                    "nama", "kategori", "kandidat", "rekomendasi", "konsisten",
+                    "penjelasan", "kemunculan",
                 ],
+                "additionalProperties": False,
+            },
+        },
+        "sumber": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "nama": {"type": "string"},
+                    "jenis": {"type": "string", "enum": JENIS_SUMBER},
+                },
+                "required": ["nama", "jenis"],
                 "additionalProperties": False,
             },
         },
         "catatan": {"type": "string"},
     },
-    "required": ["temuan", "catatan"],
+    "required": ["sumber", "temuan", "catatan"],
     "additionalProperties": False,
 }
 
@@ -154,21 +188,31 @@ Template bisa berisi placeholder {{...}} atau data objek dari laporan lama. \
 Satu data bisa muncul di beberapa file; semuanya harus diisi sama.
 
 Tugas:
+0. "sumber": jenis setiap dokumen sumber — sertifikat (SHM, SHGB, SHGU, \
+SHMSRS, dsb.), imb_pbg, proposal (proposal/surat penugasan), lembar_kerja \
+(Excel penilaian), atau lainnya.
 1. Temukan setiap DATA OBJEK di template yang harus berasal dari dokumen sumber: \
 mis. nama pemberi tugas, nomor & tanggal proposal/penugasan, tujuan penilaian, \
 tanggal inspeksi/penilaian/laporan, alamat objek, kelurahan/kecamatan/kota, \
 jenis & nomor sertifikat, NIB, nama pemegang hak, luas tanah, nomor & tanggal \
 IMB/PBG, luas bangunan, peruntukan, nilai pasar/likuidasi, dsb. Jangan \
 sertakan kalimat baku, metodologi, asumsi, atau opini penilai.
-2. Untuk setiap data, catat nilainya di SETIAP sumber yang memuatnya \
+2. "kategori" data: sertifikat (semua data yang tercantum di sertifikat: \
+jenis & nomor hak, NIB, luas tanah, pemegang hak, tempat & tanggal terbit, \
+nomor & tanggal surat ukur, letak tanah desa/kecamatan/kabupaten/provinsi), \
+bangunan (data IMB/PBG), penugasan (pemberi tugas, debitur, nomor & tanggal \
+proposal, tujuan), penilaian (tanggal penilaian/inspeksi, nilai pasar/ \
+likuidasi, kurs, hasil perhitungan), atau lainnya.
+3. Untuk setiap data, catat nilainya di SETIAP sumber yang memuatnya \
 ("kandidat"): "sumber" = nama file persis, "lokasi" = halaman PDF atau sel \
 Excel persis ("Sheet!C5"), "nilai" = nilainya, ditulis bergaya laporan \
-Indonesia (angka 1.250.000.000; tanggal 28 April 2026). Jangan menebak; \
-lewati sumber yang tidak memuat data itu.
-3. "rekomendasi" = nama file sumber yang paling berwenang untuk data itu: \
-data hukum tanah dari sertifikat, data bangunan dari IMB/PBG, data penugasan \
-dari proposal, angka hasil penilaian dari lembar kerja. Kosongkan bila tidak \
-ada kandidat.
+Indonesia (angka 1.250.000.000; tanggal 28 April 2026). Bila ada beberapa \
+sertifikat, catat nilai dari MASING-MASING sertifikat sebagai kandidat \
+tersendiri; bila satu file memuat nilai berbeda di beberapa tempat, catat \
+semuanya. "jelas" = false bila nilai di dokumen buram, tercoret/diganti, \
+tulisan tangan yang meragukan, atau Anda tidak yakin membacanya. Jangan \
+menebak; lewati sumber yang tidak memuat data itu. "rekomendasi" = nama file \
+yang menurut Anda paling tepat (aplikasi menerapkan aturan sumber sendiri).
 4. "konsisten" = apakah semua kandidat menyatakan fakta yang sama (abaikan \
 beda format/singkatan, mis. "Jl." vs "Jalan"). Bila tidak, jelaskan bedanya \
 singkat di "penjelasan".
@@ -220,26 +264,101 @@ def analisis_dokumen(
 
     data = minta_json(client, _SYSTEM, konten, _SKEMA, effort=effort, progres=progres)
 
+    nama_sumber = [n for n, _ in sumber]
+    jenis_ai = {
+        _cocokkan_nama(s["nama"], nama_sumber): s["jenis"] for s in data.get("sumber", [])
+    }
+    jenis = {n: jenis_ai.get(n) or tebak_jenis_sumber(n) for n in nama_sumber}
+
     temuan = []
     for t in data["temuan"]:
         kandidat = []
         for k in t["kandidat"]:
+            k["sumber"] = _cocokkan_nama(k["sumber"], nama_sumber)
             nilai = k["nilai"]
             # Lembar kerja: percayai isi sel, bukan salinan AI. Bila angkanya sama,
             # pertahankan tulisan Claude yang sudah berformat (mis. 595.400.000).
             if (sel := sel_per_file.get(k["sumber"])) and k["lokasi"] in sel:
                 if _digit(sel[k["lokasi"]]) != _digit(nilai) or not _digit(nilai):
                     nilai = sel[k["lokasi"]]
-            kandidat.append(Kandidat(k["sumber"], k["lokasi"], nilai))
+            kandidat.append(Kandidat(
+                k["sumber"], k["lokasi"], nilai, k.get("jelas", True),
+                jenis.get(k["sumber"]) or tebak_jenis_sumber(k["sumber"]),
+            ))
         temuan.append(Temuan(
             nama=t["nama"],
             kandidat=kandidat,
-            rekomendasi=t["rekomendasi"],
+            rekomendasi=_cocokkan_nama(t["rekomendasi"], nama_sumber),
+            kategori=t.get("kategori", "lainnya"),
             konsisten=t["konsisten"],
             penjelasan=t["penjelasan"],
             kemunculan=[Kemunculan(**m) for m in t["kemunculan"]],
         ))
     return temuan, data["catatan"]
+
+
+# =============================================================================
+# Jenis sumber & aturan pemilihan sumber
+# =============================================================================
+
+def _cocokkan_nama(nama: str, daftar: list[str]) -> str:
+    """Nama file dari Claude → nama file yang di-upload (abaikan huruf besar/kecil)."""
+    if nama in daftar:
+        return nama
+    return next((d for d in daftar if d.casefold() == nama.casefold()), nama)
+
+
+_POLA_SERTIFIKAT = re.compile(r"\b(shm|shgb|hgb|shgu|hgu|shp|shmsrs|sertifikat|sertipikat)\b", re.I)
+_POLA_IMB = re.compile(r"\b(imb|pbg|slf)\b", re.I)
+_POLA_PROPOSAL = re.compile(r"\b(proposal|spn|penawaran|penugasan|spk)\b", re.I)
+
+
+def tebak_jenis_sumber(nama: str) -> str:
+    """Cadangan bila Claude tidak menyebut jenis: tebak dari nama file."""
+    if nama.lower().endswith((".xlsx", ".xlsm")):
+        return "lembar_kerja"
+    dasar = re.sub(r"[_+\-.]", " ", nama)
+    if _POLA_SERTIFIKAT.search(dasar):
+        return "sertifikat"
+    if _POLA_IMB.search(dasar):
+        return "imb_pbg"
+    if _POLA_PROPOSAL.search(dasar):
+        return "proposal"
+    return "lainnya"
+
+
+def _bisa_dipakai(k: Kandidat, t: Temuan) -> bool:
+    """Kandidat layak dipakai: terbaca jelas dan, untuk data angka, bukan 0."""
+    if not k.jelas or not k.nilai.strip():
+        return False
+    berbentuk_angka = any(m.bentuk != "teks" for m in t.kemunculan)
+    return not (berbentuk_angka and parse_angka(k.nilai) == 0)
+
+
+def pilih_sumber(t: Temuan) -> tuple[str, str]:
+    """
+    Sumber yang dipakai untuk satu data, menurut aturan tetap per kategori
+    (URUTAN_SUMBER). Kembalikan (nama file, dasar pilihan) — nama kosong bila
+    tidak ada kandidat yang layak.
+      Data sertifikat: sertifikat → bila tidak ada/tidak jelas: lembar kerja.
+    """
+    urutan = URUTAN_SUMBER.get(t.kategori, URUTAN_SUMBER["lainnya"])
+    for posisi, jenis in enumerate(urutan):
+        k = next((k for k in t.kandidat if k.jenis == jenis and _bisa_dipakai(k, t)), None)
+        if k is None:
+            continue
+        dasar = LABEL_JENIS[jenis].capitalize()
+        if posisi > 0:
+            utama = LABEL_JENIS[urutan[0]]
+            ada_utama = any(x.jenis == urutan[0] for x in t.kandidat)
+            dasar += f" ({utama} {'tidak jelas' if ada_utama else 'tidak memuat data ini'})"
+        return k.sumber, dasar
+    # Di luar aturan: saran Claude, lalu kandidat layak pertama
+    k = next((k for k in t.kandidat if k.sumber == t.rekomendasi and _bisa_dipakai(k, t)), None) \
+        or next((k for k in t.kandidat if _bisa_dipakai(k, t)), None)
+    if k is None:
+        return "", "Tidak ada nilai yang layak (kosong, 0, atau tidak jelas)"
+    return k.sumber, f"{LABEL_JENIS.get(k.jenis, 'dokumen lain').capitalize()} (saran)"
 
 
 # =============================================================================
@@ -250,29 +369,51 @@ def _digit(teks: str) -> str:
     return re.sub(r"\D", "", teks)
 
 
+_POLA_ANGKA_TEMPLATE = re.compile(r"^(\D*?)(-?\d[\d.,]*\d|\d)(.*)$", re.S)
+
+
 def teks_pengganti(kemunculan: Kemunculan, nilai: str) -> str | None:
     """
     Teks yang ditulis di laporan untuk satu kemunculan. None bila bentuknya
-    angka/terbilang tetapi nilainya bukan angka.
+    angka/terbilang tetapi nilainya bukan angka atau bernilai 0.
+    Angka mengikuti gaya teks lama di template: jumlah desimal, titik ribuan,
+    dan awalan/satuan ("455,00 m²" + "1.974 m²" → "1.974,00 m²").
     """
     if kemunculan.bentuk == "teks":
         return ikuti_kapitalisasi(kemunculan.teks_lama, nilai)
-    angka = parse_ke_int(nilai)
-    if angka is None:
+    angka = parse_angka(nilai)
+    if angka is None or angka == 0:
         return None
     if kemunculan.bentuk == "terbilang":
-        return angka_ke_terbilang(angka)
+        return angka_ke_terbilang(round(angka))
     if kemunculan.bentuk == "terbilang_judul":
-        return angka_ke_terbilang_title(angka)
-    # Ikuti gaya angka di template: "1.000.000,00", "1.000.000", atau "250"
+        return angka_ke_terbilang_title(round(angka))
+
     lama = kemunculan.teks_lama.strip()
-    if re.search(r",\d{2}$", lama):
-        return format_angka_indonesia(angka)
-    # Template bertitik ribuan, atau placeholder (tanpa contoh format): beri titik ribuan
-    if re.search(r"\d\.\d{3}", lama) or "{{" in lama:
+    if "{{" in lama:
+        # Placeholder tidak memberi contoh format: titik ribuan, desimal bila ada
+        return format_ribuan(angka) if abs(angka) >= 1000 or not angka.is_integer() \
+            else str(int(angka))
+    m = _POLA_ANGKA_TEMPLATE.match(lama)
+    if not m:
         return format_ribuan(angka)
-    # Tanpa pemisah ribuan (mis. luas, nomor): angka apa adanya, nol di depan tetap
-    return nilai.strip() if nilai.strip().isdigit() else str(angka)
+    awal, contoh, akhir = m.groups()
+    desimal = len(contoh.rsplit(",", 1)[1]) if "," in contoh else 0
+    if desimal == 0 and not angka.is_integer():
+        desimal = len(f"{angka}".split(".")[1])     # jangan buang desimal nilai
+    # Diawali nol ("0999") = nomor/kode: tulis digit apa adanya
+    if (re.fullmatch(r"0\d+", contoh) or re.fullmatch(r"0\d+", nilai.strip())) \
+            and nilai.strip().isdigit():
+        return f"{awal}{nilai.strip()}{akhir}"
+    # Besaran (luas, nilai): titik ribuan bila template memakainya atau ≥ 1.000
+    pakai_ribuan = bool(re.search(r"\d\.\d{3}", contoh)) or abs(angka) >= 1000
+    if pakai_ribuan:
+        teks = format_ribuan(angka, desimal)
+    elif desimal:
+        teks = f"{angka:.{desimal}f}".replace(".", ",")
+    else:
+        teks = str(int(angka))
+    return f"{awal}{teks}{akhir}"
 
 
 def rencana_perubahan(
@@ -280,23 +421,30 @@ def rencana_perubahan(
 ) -> tuple[dict[str, list[Usulan]], list[str]]:
     """
     nilai_dipakai: {indeks temuan: nilai} — temuan yang tidak ada di sini
-    tidak diubah. Kembalikan ({nama template: perubahan}, peringatan).
+    tidak diubah. Kembalikan ({nama template: perubahan}, peringatan) —
+    satu peringatan per data, bukan per lokasi.
     """
     perubahan: dict[str, list[Usulan]] = {}
     peringatan: list[str] = []
     for i, nilai in nilai_dipakai.items():
         t = temuan[i]
+        dilewati: list[str] = []
         for m in t.kemunculan:
             baru = teks_pengganti(m, nilai)
             if baru is None:
-                peringatan.append(
-                    f"{t.nama}: “{nilai}” bukan angka, {m.bentuk} di {m.dokumen} "
-                    f"paragraf [{m.paragraf}] dilewati"
-                )
+                dilewati.append(Path(m.dokumen).stem)
             elif baru.casefold() != m.teks_lama.casefold():
                 perubahan.setdefault(m.dokumen, []).append(
                     Usulan(m.paragraf, m.teks_lama, baru, t.nama, "", "")
                 )
+        if dilewati:
+            alasan = "bernilai 0 (perhitungan di lembar kerja belum selesai?)" \
+                if parse_angka(nilai) == 0 else "bukan angka"
+            lokasi = ", ".join(f"{d} ({n}×)" for d, n in Counter(dilewati).items())
+            peringatan.append(
+                f"**{t.nama}**: “{nilai}” {alasan} — {len(dilewati)} lokasi angka/terbilang "
+                f"tidak diubah ({lokasi}). Pilih sumber lain atau isi manual."
+            )
     return perubahan, peringatan
 
 
@@ -312,8 +460,11 @@ def temuan_dari_dict(data: dict) -> tuple[list[Temuan], str]:
     temuan = [
         Temuan(
             nama=t["nama"],
-            kandidat=[Kandidat(**k) for k in t["kandidat"]],
+            kandidat=[
+                Kandidat(**{"jenis": tebak_jenis_sumber(k["sumber"]), **k}) for k in t["kandidat"]
+            ],
             rekomendasi=t["rekomendasi"],
+            kategori=t.get("kategori", "lainnya"),
             konsisten=t["konsisten"],
             penjelasan=t["penjelasan"],
             kemunculan=[Kemunculan(**m) for m in t["kemunculan"]],

@@ -21,7 +21,14 @@ import streamlit as st
 
 from report_maker import pekerjaan
 from report_maker.ai import get_client
-from report_maker.analisis import Temuan, analisis_dokumen, rencana_perubahan
+from report_maker.analisis import (
+    LABEL_JENIS,
+    Temuan,
+    analisis_dokumen,
+    pilih_sumber,
+    rencana_perubahan,
+    tebak_jenis_sumber,
+)
 from report_maker.checks import check_value_consistency_table
 from report_maker.docx_engine import bandingkan_format, isi_dokumen
 from report_maker.pdf import docx_ke_pdf, pdf_tersedia
@@ -138,7 +145,7 @@ st.caption(
 
 # VERSI_ANALISIS dinaikkan bila penomoran paragraf/format hasil berubah, agar hasil
 # lama yang tersimpan di server tidak dipakai ulang
-VERSI_ANALISIS = b"2"
+VERSI_ANALISIS = b"3"
 kunci = hashlib.md5(
     VERSI_ANALISIS + b"".join(n.encode() + b for n, b in [*template_bytes.items(), *sumber])
 ).hexdigest()
@@ -260,12 +267,12 @@ def _status(t: Temuan) -> str:
     return "✅ Sama" if t.konsisten else "⚠️ Berbeda"
 
 
-def _pilihan_awal(t: Temuan) -> str:
-    sumber_ada = [k.sumber for k in t.kandidat]
-    rekomendasi = _cocokkan_sumber(t.rekomendasi, nama_sumber)
-    if rekomendasi in sumber_ada:
-        return rekomendasi
-    return sumber_ada[0] if sumber_ada else JANGAN_UBAH
+# Jenis tiap sumber (dari analisis Claude, cadangan: nama file) untuk judul kolom
+jenis_sumber = {n: tebak_jenis_sumber(n) for n in kolom_sumber}
+for t in temuan:
+    for k in t.kandidat:
+        jenis_sumber[k.sumber] = k.jenis
+judul_kolom = {n: f"{n} [{LABEL_JENIS.get(jenis_sumber[n], 'dokumen lain')}]" for n in kolom_sumber}
 
 
 # Yang berbeda antarsumber tampil paling atas
@@ -278,19 +285,27 @@ m1.metric("Data ditemukan", len(temuan))
 m2.metric("Berbeda antarsumber", jumlah_beda)
 m3.metric("Lokasi di laporan", sum(len(t.kemunculan) for t in temuan))
 if jumlah_beda:
-    st.warning(f"{jumlah_beda} data berbeda antarsumber — tentukan mana yang dipakai di kolom **Gunakan**.")
+    st.warning(
+        f"{jumlah_beda} data berbeda antarsumber. Kolom **Gunakan** sudah diisi menurut aturan: "
+        "data sertifikat dari **sertifikat** (bila tidak ada/tidak jelas: lembar kerja), data "
+        "bangunan dari IMB/PBG, data penugasan dari proposal, hasil penilaian dari lembar kerja."
+    )
 
 baris = []
 for i in urutan:
     t = temuan[i]
-    per_sumber = {}
+    # Semua nilai dari tiap file (bisa lebih dari satu, mis. sheet berbeda)
+    per_sumber: dict[str, list[str]] = {}
     for k in t.kandidat:
-        per_sumber.setdefault(k.sumber, f"{k.nilai}  ({k.lokasi})")
+        tanda = "" if k.jelas else " ⚠ tidak jelas"
+        per_sumber.setdefault(k.sumber, []).append(f"{k.nilai}  ({k.lokasi}){tanda}")
+    sumber_pilihan, dasar = pilih_sumber(t)
     baris.append({
         "Data": t.nama,
         "Status": _status(t),
-        **{s: per_sumber.get(s, "") for s in kolom_sumber},
-        "Gunakan": _pilihan_awal(t),
+        **{judul_kolom[s]: " · ".join(per_sumber.get(s, [])) for s in kolom_sumber},
+        "Gunakan": sumber_pilihan or JANGAN_UBAH,
+        "Dasar pilihan": dasar if sumber_pilihan else f"— {dasar}",
         "Nilai manual": "",
         "Di laporan saat ini": " · ".join(dict.fromkeys(m.teks_lama for m in t.kemunculan)) or "—",
         "Muncul di": ", ".join(
@@ -300,8 +315,9 @@ for i in urutan:
     })
 
 st.caption(
-    "Periksa setiap baris. Kolom **Gunakan** sudah berisi sumber yang disarankan; ganti bila "
-    f"perlu, pilih **{ISI_MANUAL}** lalu tulis di *Nilai manual*, atau **{JANGAN_UBAH}**."
+    "Periksa setiap baris. Kolom **Gunakan** sudah diisi menurut aturan sumber (lihat *Dasar "
+    f"pilihan*); ganti bila perlu, pilih **{ISI_MANUAL}** lalu tulis di *Nilai manual*, atau "
+    f"**{JANGAN_UBAH}**."
 )
 df = st.data_editor(
     pd.DataFrame(baris),
@@ -329,11 +345,13 @@ for i, (_, r) in zip(urutan, df.iterrows()):
         if manual:
             nilai_dipakai[i] = manual
         else:
-            peringatan.append(f"{t.nama}: {ISI_MANUAL} dipilih tetapi Nilai manual kosong — tidak diubah")
+            peringatan.append(f"**{t.nama}**: {ISI_MANUAL} dipilih tetapi Nilai manual kosong — tidak diubah")
         continue
-    nilai = next((k.nilai for k in t.kandidat if k.sumber == pilihan), None)
+    # Dari file terpilih: utamakan nilai yang jelas, lalu nilai pertama
+    dari_file = [k for k in t.kandidat if k.sumber == pilihan]
+    nilai = next((k.nilai for k in dari_file if k.jelas), dari_file[0].nilai if dari_file else None)
     if nilai is None:
-        peringatan.append(f"{t.nama}: {pilihan} tidak memuat data ini — tidak diubah")
+        peringatan.append(f"**{t.nama}**: {pilihan} tidak memuat data ini — tidak diubah")
     else:
         nilai_dipakai[i] = nilai
 
@@ -347,8 +365,11 @@ peringatan += peringatan_angka
 
 if jumlah_kosong:
     st.caption(f"{jumlah_kosong} data hanya untuk pengecekan (tidak ada lokasinya di template).")
-for p in peringatan:
-    st.warning(p)
+if peringatan:
+    st.warning(
+        f"{len(peringatan)} data tidak diterapkan ke laporan:\n"
+        + "\n".join(f"- {p}" for p in peringatan)
+    )
 
 with st.expander(f"Rincian {jumlah_perubahan} perubahan yang akan ditulis ke laporan"):
     if jumlah_perubahan:
