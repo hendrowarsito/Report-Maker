@@ -16,11 +16,14 @@ def build_placeholder_check(
     data_excel: dict[str, str],
     data_final: dict[str, str],
     peringatan: dict[str, str],
+    asal_otomatis: dict[str, str] | None = None,
 ) -> pd.DataFrame:
     """
     Satu baris per placeholder di template, dengan nilai yang akan dipakai
     dan statusnya: dari Excel, dibuat otomatis, kosong, atau tidak ada.
+    asal_otomatis: {placeholder turunan: key angka sumbernya} untuk keterangan.
     """
+    asal_otomatis = asal_otomatis or {}
     rows = []
     for ph in sorted(placeholders, key=str.lower):
         if ph in peringatan:
@@ -29,6 +32,8 @@ def build_placeholder_check(
             status = "❌ Tidak ada di Excel"
         elif not data_final[ph]:
             status = "⚠️ Nilai kosong"
+        elif ph in asal_otomatis:
+            status = f"✅ Otomatis dari {{{{{asal_otomatis[ph]}}}}}"
         elif ph in data_excel:
             status = "✅ Dari Excel"
         else:

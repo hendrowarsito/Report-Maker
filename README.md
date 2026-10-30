@@ -148,8 +148,16 @@ Untuk nominal, tambahkan akhiran agar terbilang dibuat otomatis
 | `{{NP_nominal_TERBILANG}}`        | DUA RATUS JUTA RUPIAH   |
 | `{{NP_nominal_TERBILANG_TITLE}}`  | Dua Ratus Juta Rupiah   |
 
+Akhiran `_kalimat_cap` (KAPITAL) dan `_kalimat` (Judul) juga dikenali. Angka
+sumbernya dicari dari key dasar atau variannya — `NP`, `NP_nominal`,
+`NP_nilai`, `NP_angka` — jadi `{{NP_kalimat_cap}}` otomatis berisi terbilang
+dari `{{NP_nominal}}`. Terbilang **selalu dihitung dari angka**; teks terbilang
+di Excel (sering rusak, mis. `#NAME?` dari rumus/makro) tidak dipakai.
+
 Key sumber (`{{NP_nominal}}`) diformat ribuan hanya bila salah satu akhiran
-dipakai. Bila Excel sudah punya baris dengan nama turunan tersebut, nilai
+dipakai. Sel berisi error Excel (`#NAME?`, `#REF!`, …) atau isian sementara
+`xxx` dianggap kosong: placeholdernya dibiarkan apa adanya dan diperingatkan,
+bukan diisi teks kosong. Bila Excel sudah punya baris dengan nama turunan tersebut, nilai
 Excel yang dipakai.
 
 ## Pengaturan lain

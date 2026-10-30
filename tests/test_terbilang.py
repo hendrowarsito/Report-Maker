@@ -88,13 +88,54 @@ def test_generate_auto_terbilang_dari_akhiran():
     assert peringatan == {}
 
 
-def test_generate_auto_terbilang_sumber_bukan_angka_dan_nilai_excel_menang():
-    data = {"nama": "PT ABC", "X": "5", "X_TERBILANG": "manual"}
+def test_generate_auto_terbilang_selalu_dari_angka_dan_peringatan():
+    data = {"nama": "PT ABC", "X": "5", "X_TERBILANG": "salah ketik", "nol": "0"}
     tambahan, peringatan = generate_auto_terbilang(
-        data, {"nama_TERBILANG", "X_TERBILANG", "tidak_ada_TERBILANG"}
+        data, {"nama_TERBILANG", "X_TERBILANG", "tidak_ada_TERBILANG", "nol_TERBILANG"}
     )
-    assert tambahan == {}
-    assert peringatan == {"nama_TERBILANG": "Nilai {{nama}} bukan angka"}
+    # Teks terbilang di Excel tidak dipakai: dihitung ulang dari angka
+    assert tambahan == {"X_TERBILANG": "LIMA RUPIAH", "X": "5,00"}
+    assert peringatan == {
+        "nama_TERBILANG": "Nilai {{nama}} bukan angka",
+        "nol_TERBILANG": "Nilai {{nol}} bernilai 0",
+        "tidak_ada_TERBILANG": "Angka sumber {{tidak_ada}} / {{tidak_ada_nominal}} tidak ada",
+    }
+
+
+def test_akhiran_kalimat_dari_nominal_seperti_template_srr():
+    # Data seperti lembar kerja pengguna: terbilang Excel rusak (#NAME?)
+    data = {
+        "NP_nominal": format_nilai(151_500_000, "NP_nominal"),
+        "NL_nominal": "90.900.000,00",
+        "NP_kalimat_cap": format_nilai("#NAME?"),
+    }
+    tambahan, peringatan = generate_auto_terbilang(
+        data, {"NP_nominal", "NP_kalimat_cap", "NP_kalimat", "NL_kalimat_cap", "NL_kalimat"}
+    )
+    assert tambahan["NP_kalimat_cap"] == "SERATUS LIMA PULUH SATU JUTA LIMA RATUS RIBU RUPIAH"
+    assert tambahan["NP_kalimat"] == "Seratus Lima Puluh Satu Juta Lima Ratus Ribu Rupiah"
+    assert tambahan["NL_kalimat_cap"] == "SEMBILAN PULUH JUTA SEMBILAN RATUS RIBU RUPIAH"
+    assert tambahan["NL_kalimat"] == "Sembilan Puluh Juta Sembilan Ratus Ribu Rupiah"
+    assert tambahan["NP_nominal"] == "151.500.000,00"
+    assert peringatan == {}
+
+
+@pytest.mark.parametrize("nilai", ["#NAME?", "#VALUE!", "#REF!", "#N/A", "xxx", "XXXX"])
+def test_error_excel_dan_isian_sementara_dianggap_kosong(nilai):
+    assert format_nilai(nilai) == ""
+
+
+def test_kunci_sumber_dan_pecah_turunan():
+    from report_maker.terbilang import kunci_sumber, pecah_turunan
+
+    assert pecah_turunan("NP_kalimat_cap")[0] == "NP"
+    assert pecah_turunan("NP_kalimat")[0] == "NP"
+    assert pecah_turunan("NP_nominal")[0] is None
+    assert kunci_sumber("NP", {"NP_nominal", "lain"}) == "NP_nominal"
+    assert kunci_sumber("NP", {"NP", "NP_nominal"}) == "NP"
+    assert kunci_sumber("np", {"NP_Nominal"}) == "NP_Nominal"
+    assert kunci_sumber("NP", {"lain"}) == "NP"
+
 
 
 @pytest.mark.parametrize("kunci, nilai, teks", [

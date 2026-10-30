@@ -17,7 +17,7 @@ import anthropic
 import openpyxl
 
 from .ai import minta_json
-from .terbilang import format_nilai, format_ribuan, pecah_turunan
+from .terbilang import format_nilai, format_ribuan, kunci_sumber, pecah_turunan
 
 
 # =============================================================================
@@ -99,9 +99,10 @@ def kebutuhan_kunci(placeholders: set[str]) -> dict[str, str]:
     """
     kebutuhan: dict[str, str] = {}
     for ph in sorted(placeholders):
-        sumber, _ = pecah_turunan(ph)
-        if sumber:
-            kebutuhan[sumber] = "angka"
+        dasar, _ = pecah_turunan(ph)
+        if dasar:
+            # {{NP_kalimat_cap}} → cari angka {{NP_nominal}} bila itu yang dipakai template
+            kebutuhan[kunci_sumber(dasar, placeholders)] = "angka"
         else:
             kebutuhan.setdefault(ph, "teks")
     return kebutuhan

@@ -41,7 +41,12 @@ from report_maker.penyesuaian import (
     usulkan_penyesuaian,
     validasi_usulan,
 )
-from report_maker.terbilang import format_nilai, generate_auto_terbilang, pecah_turunan
+from report_maker.terbilang import (
+    format_nilai,
+    generate_auto_terbilang,
+    kunci_sumber,
+    pecah_turunan,
+)
 
 MIME_DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
@@ -216,7 +221,10 @@ with st.expander("Panduan placeholder"):
         "| `{{NP_nominal}}` | 200.000.000,00 |\n"
         "| `{{NP_nominal_FORMAT}}` | Rp 200.000.000,00 |\n"
         "| `{{NP_nominal_TERBILANG}}` | DUA RATUS JUTA RUPIAH |\n"
-        "| `{{NP_nominal_TERBILANG_TITLE}}` | Dua Ratus Juta Rupiah |"
+        "| `{{NP_nominal_TERBILANG_TITLE}}` | Dua Ratus Juta Rupiah |\n\n"
+        "Akhiran `_kalimat_cap` / `_kalimat` juga dikenali, dan angkanya dicari dari "
+        "`NP`, `NP_nominal`, `NP_nilai`, atau `NP_angka`: `{{NP_kalimat_cap}}` → "
+        "terbilang KAPITAL dari `{{NP_nominal}}`. Terbilang selalu dihitung dari angka."
     )
     st.caption("Key sumber diformat ribuan hanya bila salah satu akhiran dipakai.")
 
@@ -411,14 +419,21 @@ data_dict = {**data_excel, **auto_tb}
 
 # Peringatan sel/key berlaku juga untuk placeholder turunannya ({{X_TERBILANG}})
 for ph in placeholders_per_file:
-    sumber = pecah_turunan(ph)[0] or ph
+    sumber = kunci_sumber(d, data_excel) if (d := pecah_turunan(ph)[0]) else ph
     if sumber in peringatan_data and ph not in peringatan_tb:
         peringatan_tb[ph] = peringatan_data[sumber]
 
 # -- Kelengkapan data: placeholder template vs Excel --
 st.markdown("**Kelengkapan Data**")
+# Nilai kosong tidak ditulis: placeholdernya dibiarkan agar tetap terlihat & diperingatkan
+data_isi = {k: v for k, v in data_dict.items() if v != ""}
+
+asal_otomatis = {
+    ph: kunci_sumber(d, data_excel)
+    for ph in auto_tb if (d := pecah_turunan(ph)[0])
+}
 check_df = build_placeholder_check(
-    placeholders_per_file, data_excel, data_dict, peringatan_tb
+    placeholders_per_file, data_excel, data_dict, peringatan_tb, asal_otomatis
 )
 if check_df.empty:
     st.info("Tidak ada placeholder {{...}} di template.")
@@ -431,7 +446,7 @@ else:
     st.dataframe(check_df, width="stretch", hide_index=True)
 
 dipakai = set(placeholders_per_file) | {
-    pecah_turunan(ph)[0] for ph in placeholders_per_file
+    kunci_sumber(d, data_excel) for ph in placeholders_per_file if (d := pecah_turunan(ph)[0])
 }
 tidak_dipakai = sorted(set(data_excel) - dipakai)
 if tidak_dipakai:
@@ -446,7 +461,7 @@ masalah_per_file: dict[str, list[str]] = {}
 
 tabs = st.tabs(list(template_bytes))
 for tab, (nama_template, isi_template) in zip(tabs, template_bytes.items()):
-    output_bytes, raw_text, remaining = _isi(isi_template, data_dict, active_pairs)
+    output_bytes, raw_text, remaining = _isi(isi_template, data_isi, active_pairs)
     consistency_df = check_value_consistency_table(raw_text)
     salah_nominal = consistency_df["Status"].str.startswith("❌").sum()
 

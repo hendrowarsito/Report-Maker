@@ -65,6 +65,12 @@ def test_baca_sel_dan_teks_untuk_ai():
     assert "## Sheet: Rekap\nA1: Nilai pasar | B1: 1.250.000.000" in teks
 
 
+def test_kebutuhan_kunci_kalimat_cari_nominal():
+    assert kebutuhan_kunci({"NP_nominal", "NP_kalimat_cap", "NP_kalimat", "alamat"}) == {
+        "NP_nominal": "angka", "alamat": "teks",
+    }
+
+
 def test_kebutuhan_kunci_turunan_jadi_angka():
     assert kebutuhan_kunci({"alamat", "nilai_TERBILANG", "nilai", "luas_FORMAT"}) == {
         "alamat": "teks", "luas": "angka", "nilai": "angka",

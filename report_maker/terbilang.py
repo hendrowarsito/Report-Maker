@@ -188,6 +188,10 @@ _POLA_KEY_IDENTITAS = re.compile(
     r"rek|rekening|tahun|thn|year|id|rt|rw|blok|kav)(_|$|\d)",
     re.IGNORECASE,
 )
+NILAI_ERROR_EXCEL = {
+    "#NAME?", "#VALUE!", "#REF!", "#DIV/0!", "#N/A", "#NUM!", "#NULL!",
+    "#SPILL!", "#CALC!", "#GETTING_DATA", "#FIELD!", "#BLOCKED!", "#UNKNOWN!",
+}
 BATAS_RIBUAN = 10_000   # di bawah ini (mis. tahun 2026, luas 416) angka ditulis apa adanya
 
 
@@ -235,16 +239,37 @@ def format_nilai(value, kunci: str = "") -> str:
         if isinstance(angka, int):
             return str(angka)
         return f"{angka:.6f}".rstrip("0").rstrip(".").replace(".", ",")
-    return str(value).strip()
+    teks = str(value).strip()
+    # Error rumus Excel (#NAME?, #REF!, …) dan isian sementara ("xxx") = belum ada nilai
+    if teks.upper() in NILAI_ERROR_EXCEL or re.fullmatch(r"x{3,}", teks, re.IGNORECASE):
+        return ""
+    return teks
 
 
 # Placeholder turunan dibuat otomatis dari key Excel berdasarkan akhiran namanya.
-# Urutan penting: _TERBILANG_TITLE harus dicek sebelum _TERBILANG.
+# Urutan penting: akhiran yang lebih panjang dicek lebih dulu
+# (_TERBILANG_TITLE sebelum _TERBILANG, _KALIMAT_CAP sebelum _KALIMAT).
 _SUFIKS_TURUNAN = {
     "_TERBILANG_TITLE": angka_ke_terbilang_title,
+    "_KALIMAT_CAP":     angka_ke_terbilang,         # {{NP_kalimat_cap}} → DUA RATUS … RUPIAH
     "_TERBILANG":       angka_ke_terbilang,
+    "_KALIMAT":         angka_ke_terbilang_title,   # {{NP_kalimat}} → Dua Ratus … Rupiah
     "_FORMAT":          format_rupiah,
 }
+# Nama key angka sumber yang lazim untuk turunan "NP_…": NP, NP_nominal, NP_nilai, NP_angka
+_AKHIRAN_SUMBER = ("", "_nominal", "_nilai", "_angka")
+
+
+def kunci_sumber(dasar: str, kunci_tersedia) -> str:
+    """
+    Key angka untuk turunan berdasar `dasar`: "NP" → "NP_nominal" bila key
+    itulah yang ada. Tidak peka huruf besar/kecil. Bila tidak ada, `dasar`.
+    """
+    tersedia = {str(k).casefold(): k for k in kunci_tersedia}
+    for akhiran in _AKHIRAN_SUMBER:
+        if (k := tersedia.get((dasar + akhiran).casefold())) is not None:
+            return k
+    return dasar
 
 
 def pecah_turunan(ph: str):
@@ -262,12 +287,14 @@ def generate_auto_terbilang(
     Buat nilai untuk placeholder turunan yang dipakai di template, berdasarkan
     konvensi nama (akhiran tidak peka huruf besar/kecil):
 
-      {{NP_nominal_TERBILANG}}        → "DUA RATUS JUTA RUPIAH"
-      {{NP_nominal_TERBILANG_TITLE}}  → "Dua Ratus Juta Rupiah"
-      {{NP_nominal_FORMAT}}           → "Rp 200.000.000,00"
+      {{NP_nominal_TERBILANG}} / {{NP_kalimat_cap}}  → "DUA RATUS JUTA RUPIAH"
+      {{NP_nominal_TERBILANG_TITLE}} / {{NP_kalimat}} → "Dua Ratus Juta Rupiah"
+      {{NP_nominal_FORMAT}}                          → "Rp 200.000.000,00"
 
-    Key sumber yang punya turunan ikut diformat Indonesia: "200.000.000,00".
-    Placeholder yang sudah punya nilai di Excel tidak ditimpa.
+    Angka sumbernya key dasar atau varian umumnya (NP, NP_nominal, NP_nilai,
+    NP_angka). Terbilang SELALU dihitung dari angka — teks terbilang di Excel
+    (sering rusak, mis. #NAME? dari rumus/makro) tidak dipakai — agar pasti
+    sesuai nominalnya. Key sumber ikut diformat Indonesia: "200.000.000,00".
 
     Kembalikan (nilai_tambahan, peringatan) — peringatan berisi placeholder
     turunan yang tidak bisa dibuat beserta alasannya.
@@ -276,17 +303,21 @@ def generate_auto_terbilang(
     peringatan: dict[str, str] = {}
 
     for ph in sorted(placeholders):
-        if ph in data_dict:
+        dasar, fungsi = pecah_turunan(ph)
+        if dasar is None:
             continue
-        sumber, fungsi = pecah_turunan(ph)
-        if sumber is None or sumber not in data_dict:
+        sumber = kunci_sumber(dasar, data_dict)
+        if sumber not in data_dict:
+            if not data_dict.get(ph):
+                peringatan[ph] = f"Angka sumber {{{{{dasar}}}}} / {{{{{dasar}_nominal}}}} tidak ada"
             continue
-        angka = parse_ke_int(data_dict[sumber])
-        if angka is None:
-            peringatan[ph] = f"Nilai {{{{{sumber}}}}} bukan angka"
+        angka = parse_angka(data_dict[sumber])
+        if angka is None or angka == 0:
+            alasan = "bernilai 0" if angka == 0 else "bukan angka"
+            peringatan[ph] = f"Nilai {{{{{sumber}}}}} {alasan}"
             continue
 
-        tambahan[ph]     = fungsi(angka)
-        tambahan[sumber] = format_angka_indonesia(angka)
+        tambahan[ph]     = fungsi(round(angka))
+        tambahan[sumber] = format_angka_indonesia(round(angka))
 
     return tambahan, peringatan
